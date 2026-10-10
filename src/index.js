@@ -35,6 +35,8 @@ async function failEmptyRunningRuns() {
 	}
 }
 app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+app.get('/api/health/ready', async (_req, res, next) => { try { await connectDatabase(); res.json({ ok: true, database: 'connected', time: new Date().toISOString() }); } catch (error) { next(error); } });
+app.get('/', (_req, res) => res.json({ service: 'web-monitor-api', status: 'online', health: '/api/health', readiness: '/api/health/ready' }));
 app.post('/api/auth/login', (req, res) => { if (req.body.username !== config.adminUser || req.body.password !== config.adminPassword) return res.status(401).json({ error: 'Invalid credentials.' }); res.json({ token: jwt.sign({ username: config.adminUser }, config.jwtSecret, { expiresIn: '12h' }) }); });
 app.use('/api', auth);
 app.get('/api/dashboard', async (req, res, next) => {

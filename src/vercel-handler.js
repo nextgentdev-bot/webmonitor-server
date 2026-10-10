@@ -3,10 +3,11 @@ import { connectDatabase } from './db.js';
 
 export default async function handler(request, response) {
   try {
-    await connectDatabase();
+    const pathname = new URL(request.url, 'https://vercel.invalid').pathname;
+    if (pathname !== '/' && pathname !== '/api/health') await connectDatabase();
     return app(request, response);
   } catch (error) {
     console.error('Vercel API initialization failed:', error);
-    return response.status(500).json({ error: 'API initialization failed.' });
+    return response.status(503).json({ error: 'Database unavailable. Check MONGODB_URI and MongoDB Atlas network access.' });
   }
 }
