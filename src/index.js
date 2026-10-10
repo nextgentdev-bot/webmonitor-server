@@ -123,4 +123,6 @@ app.get('/api/settings', async (_req, res, next) => { try { const values = Objec
 app.put('/api/settings', async (req, res, next) => { try { for (const [key, value] of Object.entries(req.body)) await Setting.findOneAndUpdate({ key }, { value: String(value) }, { upsert: true }); res.json(req.body); } catch (error) { next(error); } });
 app.use((error, _req, res, _next) => { console.error(error); res.status(error.code === 11000 ? 409 : 500).json({ error: error.code === 11000 ? 'This website already exists.' : error.message }); });
 async function start() { await connectDatabase(); app.listen(config.port, () => { console.log(`API listening on http://localhost:${config.port}`); startScheduler(); }); }
-start().catch((error) => { console.error(error); process.exit(1); });
+export default app;
+
+if (!process.env.VERCEL) start().catch((error) => { console.error(error); process.exit(1); });

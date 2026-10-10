@@ -7,6 +7,7 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "worker": "node src/worker.js",
+    "build": "npm run check",
     "check": "node --check src/index.js && node --check src/worker.js && node --check src/monitor.js",
     "test": "node --test"
   },
