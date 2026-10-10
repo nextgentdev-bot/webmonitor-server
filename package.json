@@ -1,0 +1,25 @@
+{
+  "name": "web-monitor-server",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "worker": "node src/worker.js",
+    "check": "node --check src/index.js && node --check src/worker.js && node --check src/monitor.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "luxon": "^3.7.2",
+    "mongoose": "^8.18.0",
+    "multer": "^2.0.2",
+    "nodemailer": "^7.0.6",
+    "playwright": "^1.55.0",
+    "xlsx": "^0.18.5"
+  }
+}
