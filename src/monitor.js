@@ -9,7 +9,19 @@ const navigationSelectors = [
   '[class*="menu" i] a[href]',
   '[id*="menu" i] a[href]',
   '[class*="nav" i] a[href]',
-  '[id*="nav" i] a[href]'
+  '[id*="nav" i] a[href]',
+  '[aria-label*="navigation" i] a[href]',
+  '[role="menu"] a[href]'
+];
+const mobileNavigationSelectors = [
+  '[class*="offcanvas" i] a[href]',
+  '[id*="offcanvas" i] a[href]',
+  '[class*="drawer" i] a[href]',
+  '[id*="drawer" i] a[href]',
+  '[class*="mobile" i] a[href]',
+  '[id*="mobile" i] a[href]',
+  '[class*="collapse" i] a[href]',
+  '[aria-hidden="false"] nav a[href]'
 ];
 const menuButtonSelectors = 'button, [role="button"], [aria-controls], [aria-expanded], [data-bs-toggle="collapse"], [data-toggle="collapse"], [id*="toggler" i], [class*="toggler" i], [class*="menu-toggle" i], [class*="hamburger" i], [class*="navbar-toggler" i], [class*="mobile-menu" i], [class*="nav-toggle" i]';
 const textOf = async (locator) => [
@@ -25,7 +37,7 @@ export function normalizeMenuLabel(text) {
 
 export function matchesMenuLabel(text, type) {
   const normalized = normalizeMenuLabel(text);
-  if (type === 'contact') return /\b(contact|contacts|get in touch|reach us)\b/.test(normalized) || /যোগাযোগ/.test(normalized);
+  if (type === 'contact') return /\b(contact(?: us| page|(?: our)? team)?|contacts|get in touch|reach us)\b/.test(normalized) || /যোগাযোগ/.test(normalized);
   if (type === 'news') return isPrimaryNewsLabel(normalized) || /^(blog|blogs|posts|articles|blog posts|ব্লগ|ব্লগ পোস্ট|পোস্ট|প্রবন্ধ)( সমূহ)?$/.test(normalized);
   return false;
 }
@@ -39,13 +51,14 @@ export function isMobileMenuControlLabel(text) {
   return /^(menu|main menu|menu toggle|main menu toggle|open menu|open main menu|open navigation|open main navigation|show menu|show navigation|toggle menu|toggle navigation|toggle main menu|toggle main navigation|navigation menu|navbar|hamburger|drawer)$/.test(normalized) || /^(মেনু|মেনু খুলুন|নেভিগেশন|নেভিগেশন খুলুন|হ্যামবার্গার মেনু)$/.test(normalized);
 }
 
-async function findLink(page, type) {
+async function findLink(page, type, { includeHidden = false } = {}) {
   let fallback = null;
-  for (const selector of navigationSelectors) {
+  const selectors = includeHidden ? [...navigationSelectors, ...mobileNavigationSelectors] : navigationSelectors;
+  for (const selector of selectors) {
     const links = page.locator(selector);
     for (let index = 0; index < Math.min(await links.count(), 500); index += 1) {
       const link = links.nth(index);
-      if (!await link.isVisible().catch(() => false)) continue;
+      if (!includeHidden && !await link.isVisible().catch(() => false)) continue;
       const label = await textOf(link);
       if (!matchesMenuLabel(label, type)) continue;
       const match = { href: await link.getAttribute('href') };
@@ -84,8 +97,8 @@ async function findMobileMenuButton(page) {
   return null;
 }
 
-async function checkMenu(page, context, type) {
-  const found = await findLink(page, type);
+async function checkMenu(page, context, type, options) {
+  const found = await findLink(page, type, options);
   if (!found) return { status: 'missing', url: null, statusCode: null };
   if (!found.href || found.href.trim() === '#' || /^javascript:/i.test(found.href.trim())) return { status: 'error', url: null, statusCode: null, error: 'Menu item has no destination URL.' };
   const href = found.href ? new URL(found.href, page.url()).toString() : '';
@@ -154,23 +167,40 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
       await reportStep('Mobile checks skipped', 2);
       return { contact: { status: 'skipped' }, news: { status: 'skipped' } };
     }
-    await mobile.goto(website.url, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    try {
+      await mobile.goto(website.url, { waitUntil: 'domcontentloaded' });
+    } catch (error) {
+      await reportStep('Mobile checks failed to load', 2);
+      const result = { status: 'error', url: mobile.url() || website.url, statusCode: null, error: `Mobile homepage could not be opened: ${error.message}` };
+      return { contact: result, news: result };
+    }
     const menuButton = await findMobileMenuButton(mobile);
+    let menuOpenError = null;
     if (menuButton) {
-      await menuButton.click().catch(() => {});
-      await mobile.waitForTimeout(150);
+      try {
+        await menuButton.click({ timeout: 3000 });
+        await mobile.waitForTimeout(300);
+      } catch (error) {
+        menuOpenError = error.message;
+      }
     }
     const [contact, news] = await Promise.all([
-      checkMenu(mobile, mobileContext, 'contact').then(async (result) => { await reportStep('Mobile Contact checked'); return result; }),
-      checkMenu(mobile, mobileContext, 'news').then(async (result) => { await reportStep('Mobile News checked'); return result; })
+      checkMenu(mobile, mobileContext, 'contact', { includeHidden: true }).then(async (result) => { await reportStep('Mobile Contact checked'); return result; }),
+      checkMenu(mobile, mobileContext, 'news', { includeHidden: true }).then(async (result) => { await reportStep('Mobile News checked'); return result; })
     ]);
-    return { contact, news };
+    const explainClosedMenu = (result) => menuOpenError && result.status === 'missing'
+      ? { ...result, error: `Mobile menu could not be opened: ${menuOpenError}` }
+      : result;
+    return { contact: explainClosedMenu(contact), news: explainClosedMenu(news) };
   })();
 
   const [[desktopContact, desktopNews], mobileResult] = await Promise.all([desktopChecks, mobileChecks]);
   const desktopResult = { contact: desktopContact, news: desktopNews };
   for (const [label, result] of [['Desktop Contact', desktopContact], ['Desktop News', desktopNews], ['Mobile Contact', mobileResult.contact], ['Mobile News', mobileResult.news]]) {
-    if (result.status !== 'working' && result.status !== 'skipped') issues.push(`${label}: ${result.status === 'missing' ? 'Not added.' : `Added but link has an error${result.error ? ` (${result.error})` : '.'}`}`);
+    if (result.status !== 'working' && result.status !== 'skipped') {
+      const detail = result.error || (result.status === 'missing' ? 'Not added.' : 'Link has an error.');
+      issues.push(`${label}: ${detail}`);
+    }
   }
 
   const status = !homepage.statusCode || homepage.statusCode >= 500 || homepage.sslValid === false ? 'critical' : issues.length ? 'warning' : 'healthy';

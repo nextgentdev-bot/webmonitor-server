@@ -29,6 +29,34 @@ Vercel functions are short-lived and do not run the persistent Playwright worker
 
 Screenshots written to the function filesystem are ephemeral. Use object storage (for example, S3-compatible storage) before relying on screenshots in production.
 
+## Local development
+
+From the project root, start the client, API, and Playwright worker together with one command:
+
+```powershell
+cd web-monitor-client
+npm run dev
+```
+
+This starts Vite, the API server, and the monitoring worker in the same terminal. Keep it open while using the dashboard; press Ctrl+C to stop all three.
+
+To start services separately, use three terminals:
+
+```powershell
+cd web-monitor-client
+npm run server
+```
+
+```powershell
+cd web-monitor-client
+npm run worker
+```
+
+The client is available at `http://localhost:5173`. Keep the API and worker terminals running while monitoring sites.
+The dashboard shows whether the worker heartbeat is online. The worker logs each website as it starts and finishes a check, retries checks left processing by a stopped worker, and reports mobile navigation errors separately.
+
+Websites are displayed in a stable saved order. New rows imported from a Google Sheets tab are appended in the same order as the sheet; importing a URL that already exists updates it without changing its position. Sheet imports detect an optional header row, so a headerless sheet's first website is imported too.
+
 ## Local verification
 
 ```powershell
