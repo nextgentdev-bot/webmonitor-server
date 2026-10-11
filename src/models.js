@@ -4,6 +4,7 @@ const websiteSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   url: { type: String, required: true, unique: true, trim: true },
   active: { type: Boolean, default: true },
+  sortOrder: { type: Number, index: true },
   lastCheck: { type: mongoose.Schema.Types.ObjectId, ref: 'Check', default: null }
 }, { timestamps: true });
 
@@ -27,6 +28,8 @@ const checkSchema = new mongoose.Schema({
   rawResult: mongoose.Schema.Types.Mixed,
   errorSummary: String
 }, { timestamps: true });
+
+checkSchema.index({ run: 1, status: 1 });
 
 const runSchema = new mongoose.Schema({
   type: { type: String, enum: ['manual', 'daily'], default: 'manual' },
