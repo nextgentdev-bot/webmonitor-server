@@ -14,7 +14,7 @@ export const config = {
   jwtSecret: process.env.JWT_SECRET || 'local-development-secret',
   adminUser: process.env.ADMIN_USER || 'admin',
   adminPassword: process.env.ADMIN_PASSWORD || 'change-this-password',
-  maxWebsites: number('MAX_WEBSITES', 500),
+  maxWebsites: number('MAX_WEBSITES', 1000),
   workerConcurrency: Math.max(1, number('WORKER_CONCURRENCY', 2)),
   checkTimeoutMs: number('CHECK_TIMEOUT_MS', 30000),
   navigationTimeoutMs: number('NAVIGATION_TIMEOUT_MS', 30000),

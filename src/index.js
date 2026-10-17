@@ -8,7 +8,7 @@ import { connectDatabase } from './db.js';
 import { config } from './config.js';
 import { Check, Run, Setting, Website } from './models.js';
 import { cancelRun, enqueueRun, maybeFinalizeRun, runDetails } from './queue.js';
-import { nameFromUrl, normalizeUrl, parseBulkText, parseGoogleSheetRows, summarizeWebsiteProgress, toCsv } from './utils.js';
+import { countHealthyWebsites, defaultGoogleSheetTab, nameFromUrl, normalizeUrl, parseBulkText, parseGoogleSheetRows, summarizeWebsiteProgress, toCsv } from './utils.js';
 import { startScheduler } from './scheduler.js';
 
 const app = express(); const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -17,19 +17,23 @@ function googleSheetCsvUrl(input) {
 	const value = String(input || '').trim();
 	const match = value.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
 	if (!match) throw new Error('Paste a valid Google Sheets URL.');
-	const gid = value.match(/[?#&]gid=(\d+)/)?.[1] || '0';
-	return { url: `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv&gid=${gid}`, gid };
+	const gid = value.match(/[?#&]gid=(\d+)/)?.[1] || null;
+	return { spreadsheetId: match[1], gid };
 }
 async function rowsFromGoogleSheet(input) {
-	const { url, gid } = googleSheetCsvUrl(input);
-	const exportUrl = new URL(url);
+	const { spreadsheetId, gid } = googleSheetCsvUrl(input);
+	const exportUrl = new URL(`https://docs.google.com/spreadsheets/d/${spreadsheetId}/export`);
+	exportUrl.searchParams.set('format', gid ? 'csv' : 'xlsx');
+	if (gid) exportUrl.searchParams.set('gid', gid);
 	exportUrl.searchParams.set('_cacheBust', String(Date.now()));
 	const response = await fetch(exportUrl, { redirect: 'follow', headers: { 'cache-control': 'no-cache' } });
 	if (!response.ok || new URL(response.url).hostname === 'accounts.google.com') throw new Error('Google Sheet could not be read. Set General access to Anyone with the link: Viewer.');
 	const workbook = XLSX.read(await response.arrayBuffer(), { type: 'array' });
-	const data = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { header: 1, defval: '', blankrows: false });
+	const sheetName = gid ? workbook.SheetNames[0] : defaultGoogleSheetTab(workbook.SheetNames);
+	if (!sheetName) throw new Error('Google Sheet does not contain any tabs.');
+	const data = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: '', blankrows: false });
 	const rows = parseGoogleSheetRows(data);
-	return { rows, gid };
+	return { rows, gid, tab: gid ? `gid=${gid}` : sheetName };
 }
 const auth = (req, res, next) => { const token = req.headers.authorization?.replace('Bearer ', ''); try { req.user = jwt.verify(token, config.jwtSecret); next(); } catch { res.status(401).json({ error: 'Authentication required.' }); } };
 async function failEmptyRunningRuns() {
@@ -41,6 +45,13 @@ async function failEmptyRunningRuns() {
 async function deleteWebsiteChecks(filter) {
 	const runIds = await Check.distinct('run', filter);
 	await Check.deleteMany(filter);
+	await Promise.all(runIds.map((runId) => maybeFinalizeRun(runId)));
+}
+async function pauseWebsites(ids) {
+	await Website.updateMany({ _id: { $in: ids } }, { $set: { active: false, lastCheck: null } });
+	const checkFilter = { website: { $in: ids }, status: { $in: ['pending', 'processing'] } };
+	const runIds = await Check.distinct('run', checkFilter);
+	await Check.updateMany(checkFilter, { $set: { status: 'cancelled', progressStage: 'Paused', finishedAt: new Date(), lockedAt: null, lockedBy: null } });
 	await Promise.all(runIds.map((runId) => maybeFinalizeRun(runId)));
 }
 async function ensureWebsiteOrder() {
@@ -68,7 +79,7 @@ async function getWorkerStatus() {
 app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 app.get('/api/health/ready', async (_req, res, next) => { try { await connectDatabase(); res.json({ ok: true, database: 'connected', time: new Date().toISOString() }); } catch (error) { next(error); } });
 app.get('/', (_req, res) => res.json({ service: 'web-monitor-api', status: 'online', health: '/api/health', readiness: '/api/health/ready' }));
-app.post('/api/auth/login', (req, res) => { if (req.body.username !== config.adminUser || req.body.password !== config.adminPassword) return res.status(401).json({ error: 'Invalid credentials.' }); res.json({ token: jwt.sign({ username: config.adminUser }, config.jwtSecret, { expiresIn: '12h' }) }); });
+app.post('/api/auth/login', (req, res) => { if (req.body.username !== config.adminUser || req.body.password !== config.adminPassword) return res.status(401).json({ error: 'Invalid credentials.' }); res.json({ token: jwt.sign({ username: config.adminUser }, config.jwtSecret, { expiresIn: '10h' }) }); });
 app.use('/api', auth);
 app.get('/api/dashboard', async (req, res, next) => {
 	try {
@@ -76,15 +87,18 @@ app.get('/api/dashboard', async (req, res, next) => {
 		await ensureWebsiteOrder();
 		const search = String(req.query.search || '').trim();
 		const query = search ? { $or: [{ name: new RegExp(search, 'i') }, { url: new RegExp(search, 'i') }] } : {};
-		const [websites, total, active, latestRun, activeRun, progressWebsites, worker] = await Promise.all([
+		const [websites, total, active, latestRun, activeRun, progressWebsites, newestActiveWebsite, worker] = await Promise.all([
 			Website.find(query).sort({ sortOrder: 1, _id: 1 }).limit(config.maxWebsites).populate('lastCheck').lean(),
 			Website.countDocuments(query),
 			Website.countDocuments({ ...query, active: true }),
 			Run.findOne().sort({ startedAt: -1 }).lean(),
 			Run.findOne({ status: 'running' }).sort({ startedAt: -1 }).lean(),
-			Website.find().select('lastCheck').populate('lastCheck', 'status progressPercent').lean(),
+			Website.find().select('active lastCheck').populate('lastCheck', 'status progressPercent').lean(),
+			Website.findOne({ active: true }).sort({ createdAt: -1 }).select('createdAt').lean(),
 			getWorkerStatus()
 		]);
+		const latestRunIsStale = Boolean(latestRun && newestActiveWebsite && newestActiveWebsite.createdAt > latestRun.startedAt);
+		const healthy = countHealthyWebsites(progressWebsites);
 		const progressRun = activeRun || latestRun;
 		const runChecks = progressRun ? await Check.find({ run: progressRun._id }).select('website status startedAt progressPercent progressStage').lean() : [];
 		const runProgress = summarizeWebsiteProgress(
@@ -101,9 +115,9 @@ app.get('/api/dashboard', async (req, res, next) => {
 		const checksByWebsite = new Map(runChecks.map((check) => [String(check.website), { status: check.status, startedAt: check.startedAt, progressPercent: check.progressPercent || 0, progressStage: check.progressStage || 'Queued' }]));
 		const dashboardWebsites = websites.map((website) => ({
 			...website,
-			...(progressRun && checksByWebsite.has(String(website._id)) ? { currentCheck: checksByWebsite.get(String(website._id)) } : {})
+			...(website.active && progressRun && checksByWebsite.has(String(website._id)) ? { currentCheck: checksByWebsite.get(String(website._id)) } : {})
 		}));
-		res.json({ websites: dashboardWebsites, stats: { total, active, latestRun, runProgress, worker } });
+		res.json({ websites: dashboardWebsites, stats: { total, active, healthy, latestRun, latestRunIsStale, runProgress, worker } });
 	} catch (error) { next(error); }
 });
 app.get('/api/worker/status', async (_req, res, next) => {
@@ -111,11 +125,11 @@ app.get('/api/worker/status', async (_req, res, next) => {
 });
 app.post('/api/websites', async (req, res, next) => { try { if (await Website.countDocuments() >= config.maxWebsites) return res.status(400).json({ error: `Maximum ${config.maxWebsites} websites are allowed.` }); const url = normalizeUrl(req.body.url); const sortOrder = await nextWebsiteOrder(); const website = await Website.create({ name: String(req.body.name || '').trim() || nameFromUrl(url), url, sortOrder, active: req.body.active !== false }); res.status(201).json(website); } catch (error) { next(error); } });
 app.delete('/api/websites', async (_req, res, next) => { try { await deleteWebsiteChecks({}); const result = await Website.deleteMany({}); res.json({ deleted: result.deletedCount }); } catch (error) { next(error); } });
-app.patch('/api/websites/:id', async (req, res, next) => { try { const update = {}; if (req.body.url) update.url = normalizeUrl(req.body.url); if (req.body.name !== undefined) update.name = String(req.body.name).trim(); if (req.body.active !== undefined) update.active = Boolean(req.body.active); const website = await Website.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true }); if (!website) return res.status(404).json({ error: 'Website not found.' }); res.json(website); } catch (error) { next(error); } });
+app.patch('/api/websites/:id', async (req, res, next) => { try { const update = {}; if (req.body.url) update.url = normalizeUrl(req.body.url); if (req.body.name !== undefined) update.name = String(req.body.name).trim(); if (req.body.active === false) await pauseWebsites([req.params.id]); else if (req.body.active !== undefined) update.active = Boolean(req.body.active); const website = Object.keys(update).length ? await Website.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true }) : await Website.findById(req.params.id); if (!website) return res.status(404).json({ error: 'Website not found.' }); res.json(website); } catch (error) { next(error); } });
 app.delete('/api/websites/:id', async (req, res, next) => { try { await Website.findByIdAndDelete(req.params.id); await deleteWebsiteChecks({ website: req.params.id }); res.json({ ok: true }); } catch (error) { next(error); } });
-app.post('/api/websites/bulk-action', async (req, res, next) => { try { const ids = req.body.ids || []; const action = req.body.action; if (action === 'activate' || action === 'pause') await Website.updateMany({ _id: { $in: ids } }, { $set: { active: action === 'activate' } }); else if (action === 'delete') { await deleteWebsiteChecks({ website: { $in: ids } }); const result = await Website.deleteMany({ _id: { $in: ids } }); return res.json({ deleted: result.deletedCount }); } else if (action === 'check') return res.json(await enqueueRun({ type: 'manual', websiteIds: ids })); else return res.status(400).json({ error: 'Unknown action.' }); res.json({ ok: true }); } catch (error) { next(error); } });
+app.post('/api/websites/bulk-action', async (req, res, next) => { try { const ids = req.body.ids || []; const action = req.body.action; if (action === 'pause') await pauseWebsites(ids); else if (action === 'activate') await Website.updateMany({ _id: { $in: ids } }, { $set: { active: true } }); else if (action === 'delete') { await deleteWebsiteChecks({ website: { $in: ids } }); const result = await Website.deleteMany({ _id: { $in: ids } }); return res.json({ deleted: result.deletedCount }); } else if (action === 'check') return res.json(await enqueueRun({ type: 'manual', websiteIds: ids })); else return res.status(400).json({ error: 'Unknown action.' }); res.json({ ok: true }); } catch (error) { next(error); } });
 app.post('/api/import/preview', upload.single('file'), async (req, res, next) => { try { let rows = parseBulkText(req.body.urls || ''); if (req.file) { const workbook = XLSX.read(req.file.buffer, { type: 'buffer' }); const data = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: '' }); rows = rows.concat(data.map((row) => ({ name: row['Website Name'] || row.name || '', url: row['Website URL'] || row.url || Object.values(row)[0] }))); } const existing = new Set((await Website.find().select('url -_id').lean()).map((row) => row.url)); const seen = new Set(); const preview = rows.map((row, index) => { try { const url = normalizeUrl(row.url); const valid = !existing.has(url) && !seen.has(url); seen.add(url); return { rowNumber: index + 1, name: row.name || nameFromUrl(url), url, valid, reason: valid ? '' : existing.has(url) ? 'Already added' : 'Duplicate in import' }; } catch (error) { return { rowNumber: index + 1, name: row.name, url: row.url, valid: false, reason: error.message }; } }); res.json({ rows: preview, validCount: preview.filter((row) => row.valid).length }); } catch (error) { next(error); } });
-app.post('/api/import/google-sheet/preview', async (req, res, next) => { try { const { rows, gid } = await rowsFromGoogleSheet(req.body.url); const existing = new Set((await Website.find().select('url -_id').lean()).map((row) => row.url)); const seen = new Set(); const preview = rows.map((row, index) => { try { const url = normalizeUrl(row.url); const valid = !seen.has(url); seen.add(url); return { rowNumber: index + 2, name: row.name || nameFromUrl(url), url, valid, action: existing.has(url) ? 'update' : 'add', reason: valid ? '' : 'Duplicate in sheet' }; } catch (error) { return { rowNumber: index + 2, name: row.name, url: row.url, valid: false, reason: error.message }; } }); res.json({ rows: preview, validCount: preview.filter((row) => row.valid).length, sourceCount: rows.length, gid }); } catch (error) { next(error); } });
+app.post('/api/import/google-sheet/preview', async (req, res, next) => { try { const { rows, gid, tab } = await rowsFromGoogleSheet(req.body.url); const existing = new Set((await Website.find().select('url -_id').lean()).map((row) => row.url)); const seen = new Set(); const preview = rows.map((row, index) => { try { const url = normalizeUrl(row.url); const valid = !seen.has(url); seen.add(url); return { rowNumber: index + 2, name: row.name || nameFromUrl(url), url, valid, action: existing.has(url) ? 'update' : 'add', reason: valid ? '' : 'Duplicate in sheet' }; } catch (error) { return { rowNumber: index + 2, name: row.name, url: row.url, valid: false, action: 'invalid', reason: error.message }; } }); res.json({ rows: preview, validCount: preview.filter((row) => row.valid).length, sourceCount: rows.length, gid, tab }); } catch (error) { next(error); } });
 app.post('/api/import/google-sheet/commit', async (req, res, next) => {
 	try {
 		await ensureWebsiteOrder();

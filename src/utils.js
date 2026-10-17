@@ -32,6 +32,12 @@ export function parseGoogleSheetRows(grid) {
     return [{ name, url }];
   });
 }
+export function defaultGoogleSheetTab(sheetNames) {
+  return sheetNames.find((name) => /^all\s+sites?$/i.test(name.trim())) || sheetNames[0] || null;
+}
+export function countHealthyWebsites(websiteChecks) {
+  return websiteChecks.filter(({ active, lastCheck }) => active && lastCheck?.status === 'healthy').length;
+}
 export function summarizeWebsiteProgress(websiteChecks, runChecks, runStatus) {
   const checksByWebsite = new Map(runChecks.map((check) => [check.websiteId, check]));
   const statuses = websiteChecks.map(({ websiteId, lastCheck }) => checksByWebsite.get(websiteId) || lastCheck);
@@ -41,11 +47,13 @@ export function summarizeWebsiteProgress(websiteChecks, runChecks, runStatus) {
   const total = statuses.length;
   const progressUnits = statuses.reduce((sum, check) => {
     if (['healthy', 'warning', 'critical'].includes(check?.status)) return sum + 100;
+    if (check?.status === 'cancelled') return sum + 100;
     if (check?.status === 'processing') return sum + (check.progressPercent || 0);
     return sum;
   }, 0);
+  const terminal = completed + cancelled;
   return {
-    status: runStatus === 'running' ? 'running' : total > 0 && completed === total ? 'completed' : runStatus === 'cancelled' ? 'cancelled' : 'idle',
+    status: runStatus === 'cancelled' ? 'cancelled' : runStatus === 'running' && terminal < total ? 'running' : total > 0 && terminal === total ? 'completed' : 'idle',
     total,
     completed,
     processing,

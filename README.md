@@ -21,7 +21,7 @@ Required:
 
 If the React client is deployed separately, set `VITE_API_URL` in the client Vercel project to this API deployment's origin (for example, `https://your-api-project.vercel.app`). Set `CLIENT_ORIGIN` in this server project to the client's exact origin.
 
-Optional values can be copied from `.env.example` as needed. `PORT` is not needed on Vercel; Vercel supplies the serverless request/response lifecycle. Do not paste `.env` values into chat or commit them.
+Optional values can be copied from `.env.example` as needed. Set `MAX_WEBSITES` to at least `1000` in Vercel to allow larger inventories. `PORT` is not needed on Vercel; Vercel supplies the serverless request/response lifecycle. Do not paste `.env` values into chat or commit them.
 
 ## Important runtime limitation
 
@@ -55,7 +55,7 @@ npm run worker
 The client is available at `http://localhost:5173`. Keep the API and worker terminals running while monitoring sites.
 The dashboard shows whether the worker heartbeat is online. The worker logs each website as it starts and finishes a check, retries checks left processing by a stopped worker, and reports mobile navigation errors separately.
 
-Websites are displayed in a stable saved order. New rows imported from a Google Sheets tab are appended in the same order as the sheet; importing a URL that already exists updates it without changing its position. Sheet imports detect an optional header row, so a headerless sheet's first website is imported too.
+Websites are displayed in a stable saved order. New rows imported from a Google Sheets tab are appended in the same order as the sheet; importing a URL that already exists updates it without changing its position. Sheet imports detect an optional header row, so a headerless sheet's first website is imported too. A Google Sheets URL with a `gid` imports that tab; without one, the importer prefers a tab named `All site` or `All sites`, then falls back to the first tab.
 
 ## Local verification
 
