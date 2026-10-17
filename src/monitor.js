@@ -121,7 +121,7 @@ async function screenshot(page, runId, website, mode) {
   return `/screenshots/${path.relative(config.screenshotDir, file).replaceAll(path.sep, '/')}`;
 }
 
-export async function monitorWebsite(browser, { website, runId, onProgress = async () => {} }) {
+export async function monitorWebsite(browser, { website, runId, onProgress = async () => {}, signal }) {
   let completedSteps = 0;
   const reportStep = async (stage, count = 1) => {
     completedSteps += count;
@@ -129,6 +129,12 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
   };
   const issues = [];
   const desktopContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const contexts = [desktopContext];
+  const closeContexts = () => {
+    for (const context of contexts) context.close().catch((error) => console.error('Unable to close cancelled browser context:', error.message));
+  };
+  signal?.addEventListener('abort', closeContexts, { once: true });
+  if (signal?.aborted) closeContexts();
   const desktop = await desktopContext.newPage();
   desktop.setDefaultNavigationTimeout(config.navigationTimeoutMs);
   let homepage = { statusCode: null, loadTimeMs: null, sslValid: null, blank: false, finalUrl: website.url, error: null };
@@ -148,6 +154,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     if (homepage.blank) issues.push('Main website appears blank.');
     if (homepage.loadTimeMs > config.slowPageMs) issues.push(`Main website is slow (${homepage.loadTimeMs} ms).`);
   } catch (error) {
+    if (signal?.aborted) throw signal.reason || error;
     homepage.error = error.message;
     homepage.sslValid = !/ssl|certificate|cert_/i.test(error.message);
     issues.push(`Main website could not be opened: ${error.message}`);
@@ -160,6 +167,8 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
   ]);
 
   const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  contexts.push(mobileContext);
+  if (signal?.aborted) closeContexts();
   const mobile = await mobileContext.newPage();
   mobile.setDefaultNavigationTimeout(config.navigationTimeoutMs);
   const mobileChecks = (async () => {
@@ -170,6 +179,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     try {
       await mobile.goto(website.url, { waitUntil: 'domcontentloaded' });
     } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
       await reportStep('Mobile checks failed to load', 2);
       const result = { status: 'error', url: mobile.url() || website.url, statusCode: null, error: `Mobile homepage could not be opened: ${error.message}` };
       return { contact: result, news: result };
@@ -195,6 +205,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
   })();
 
   const [[desktopContact, desktopNews], mobileResult] = await Promise.all([desktopChecks, mobileChecks]);
+  if (signal?.aborted) throw signal.reason || new Error('Run cancelled.');
   const desktopResult = { contact: desktopContact, news: desktopNews };
   for (const [label, result] of [['Desktop Contact', desktopContact], ['Desktop News', desktopNews], ['Mobile Contact', mobileResult.contact], ['Mobile News', mobileResult.news]]) {
     if (result.status !== 'working' && result.status !== 'skipped') {
@@ -206,7 +217,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
   const status = !homepage.statusCode || homepage.statusCode >= 500 || homepage.sslValid === false ? 'critical' : issues.length ? 'warning' : 'healthy';
   let screenshots = [];
   if (config.screenshotOnIssue && status !== 'healthy') screenshots = [await screenshot(desktop, runId, website, 'desktop').catch(() => null)].filter(Boolean);
-  await desktopContext.close();
-  await mobileContext.close();
+  signal?.removeEventListener('abort', closeContexts);
+  await Promise.all(contexts.map((context) => context.close()));
   return { overallStatus: status, homepage, desktop: desktopResult, mobile: mobileResult, issues, screenshots };
 }

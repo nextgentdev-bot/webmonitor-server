@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { isMobileMenuControlLabel, matchesMenuLabel, normalizeMenuLabel } from './monitor.js';
-import { parseGoogleSheetRows, summarizeWebsiteProgress } from './utils.js';
+import { countHealthyWebsites, defaultGoogleSheetTab, parseGoogleSheetRows, summarizeWebsiteProgress } from './utils.js';
 
 test('normalizes mixed Bengali and English navigation labels', () => {
   assert.equal(normalizeMenuLabel('  Contact—Us  '), 'contact us');
@@ -59,6 +59,21 @@ test('skips Google Sheet headers and preserves website row order', () => {
   ]);
 });
 
+test('chooses an All site tab by default and otherwise uses the first sheet', () => {
+  assert.equal(defaultGoogleSheetTab(['Sheet61', 'All site', 'Oct 09']), 'All site');
+  assert.equal(defaultGoogleSheetTab(['Sheet1', 'Archive']), 'Sheet1');
+  assert.equal(defaultGoogleSheetTab([]), null);
+});
+
+test('counts healthy checks across all active websites, independent of the latest run', () => {
+  assert.equal(countHealthyWebsites([
+    { active: true, lastCheck: { status: 'healthy' } },
+    { active: true, lastCheck: { status: 'warning' } },
+    { active: true, lastCheck: null },
+    { active: false, lastCheck: { status: 'healthy' } }
+  ]), 1);
+});
+
 test('shows zero progress and waiting websites before a worker run starts', () => {
   assert.deepEqual(summarizeWebsiteProgress([
     { websiteId: 'first', lastCheck: null },
@@ -92,5 +107,24 @@ test('aggregates worker progress against all current websites', () => {
     queued: 1,
     cancelled: 0,
     percent: 50
+  });
+});
+
+test('counts paused websites as resolved without exposing them as active work', () => {
+  assert.deepEqual(summarizeWebsiteProgress([
+    { websiteId: 'active', lastCheck: null },
+    { websiteId: 'paused', lastCheck: null }
+  ], [
+    { websiteId: 'active', status: 'healthy', progressPercent: 100 },
+    { websiteId: 'paused', status: 'cancelled', progressPercent: 25 }
+  ], 'completed'), {
+    status: 'completed',
+    total: 2,
+    completed: 1,
+    processing: 0,
+    pending: 0,
+    queued: 0,
+    cancelled: 1,
+    percent: 100
   });
 });

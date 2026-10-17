@@ -2,7 +2,7 @@ import os from 'node:os';
 import { Check, Run, Website } from './models.js';
 import { config } from './config.js';
 
-export async function enqueueRun({ type = 'manual', websiteIds = null, localRunDate = null } = {}) { const filter = websiteIds?.length ? { _id: { $in: websiteIds } } : { active: true }; const websites = await Website.find(filter).limit(config.maxWebsites).lean(); if (!websites.length) return { created: false, reason: websiteIds?.length ? 'No selected websites were found.' : 'No active websites are available.' }; if (type === 'daily' && await Run.exists({ status: 'running', type: 'daily' })) return { created: false, reason: 'A daily monitoring run is already in progress.' }; const run = await Run.create({ type, total: websites.length, localRunDate }); await Check.insertMany(websites.map((website) => ({ run: run._id, website: website._id }))); return { created: true, runId: run._id.toString(), total: websites.length }; }
+export async function enqueueRun({ type = 'manual', websiteIds = null, localRunDate = null } = {}) { const filter = { active: true, ...(websiteIds?.length ? { _id: { $in: websiteIds } } : {}) }; const websites = await Website.find(filter).limit(config.maxWebsites).lean(); if (!websites.length) return { created: false, reason: websiteIds?.length ? 'No selected websites are available to check.' : 'No active websites are available.' }; if (type === 'daily' && await Run.exists({ status: 'running', type: 'daily' })) return { created: false, reason: 'A daily monitoring run is already in progress.' }; const run = await Run.create({ type, total: websites.length, localRunDate }); await Check.insertMany(websites.map((website) => ({ run: run._id, website: website._id }))); return { created: true, runId: run._id.toString(), total: websites.length }; }
 export async function claimNextCheck(workerId = `${os.hostname()}-${process.pid}`) { const runningRuns = await Run.find({ status: 'running' }).select('_id').lean(); if (!runningRuns.length) return null; const check = await Check.findOneAndUpdate({ run: { $in: runningRuns.map((run) => run._id) }, status: 'pending', scheduledAt: { $lte: new Date() } }, { $set: { status: 'processing', lockedAt: new Date(), lockedBy: workerId, startedAt: new Date(), progressPercent: 0, progressStage: 'Starting' }, $inc: { attempts: 1 } }, { sort: { scheduledAt: 1, createdAt: 1 }, new: true }).populate('website'); return check ? { check, website: check.website } : null; }
 export async function recoverStaleChecks() {
 	const lockTimeout = Math.max(config.checkTimeoutMs, config.navigationTimeoutMs) * 3;
@@ -32,6 +32,7 @@ export async function maybeFinalizeRun(runId) {
 	const counts = Object.fromEntries(statusCounts.map(({ _id, count }) => [_id, count]));
 	const completed = ['healthy', 'warning', 'critical'].reduce((sum, status) => sum + (counts[status] || 0), 0);
 	const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+	const terminal = completed + (counts.cancelled || 0);
 	if (total === 0) {
 		return Run.findOneAndUpdate(
 			{ _id: runId, status: 'running' },
@@ -40,7 +41,7 @@ export async function maybeFinalizeRun(runId) {
 		);
 	}
 	await Run.findOneAndUpdate({ _id: runId, status: 'running' }, { $set: { total } });
-	if (completed !== total) return null;
-	return Run.findOneAndUpdate({ _id: runId, status: 'running' }, { $set: { status: 'completed', total, completed, healthy: counts.healthy || 0, warning: counts.warning || 0, critical: counts.critical || 0, finishedAt: new Date() } }, { new: true });
+	if (terminal !== total) return null;
+	return Run.findOneAndUpdate({ _id: runId, status: 'running' }, { $set: { status: completed ? 'completed' : 'cancelled', total, completed, healthy: counts.healthy || 0, warning: counts.warning || 0, critical: counts.critical || 0, finishedAt: new Date() } }, { new: true });
 }
 export async function runDetails(runId) { const run = await Run.findById(runId).lean(); if (!run) return null; const checks = await Check.find({ run: runId }).populate('website', 'name url').sort({ status: 1 }).lean(); return { run, checks }; }
