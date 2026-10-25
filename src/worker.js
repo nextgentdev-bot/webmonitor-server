@@ -2,7 +2,7 @@ import os from 'node:os';
 import { chromium } from 'playwright';
 import { connectDatabase } from './db.js';
 import { config } from './config.js';
-import { Check, Run, Setting } from './models.js';
+import { Setting } from './models.js';
 import { claimNextCheck, completeCheck, failCheck, maybeFinalizeRun, recoverStaleChecks, updateCheckProgress } from './queue.js';
 import { monitorWebsite } from './monitor.js';
 
@@ -31,41 +31,16 @@ async function loop(browser, slot) {
 			continue;
 		}
 		console.log(`Worker ${slot} checking ${claimed.website.url}`);
-		const abortController = new AbortController();
-		let cancellationCheckActive = false;
-		const cancellationWatcher = setInterval(async () => {
-			if (cancellationCheckActive) return;
-			cancellationCheckActive = true;
-			try {
-				const [run, check] = await Promise.all([
-					Run.findById(claimed.check.run).select('status').lean(),
-					Check.findById(claimed.check._id).select('status').lean()
-				]);
-				if (!run || run.status !== 'running' || !check || check.status !== 'processing') {
-					abortController.abort(new Error('Run cancelled.'));
-				}
-			} catch (error) {
-				console.error(`Worker ${slot} could not check cancellation status:`, error);
-			} finally {
-				cancellationCheckActive = false;
-			}
-		}, 750);
 		try {
 			const result = await monitorWebsite(browser, {
 				website: claimed.website,
 				runId: claimed.check.run,
-				signal: abortController.signal,
 				onProgress: (progress) => updateCheckProgress(claimed.check._id, progress).catch((error) => console.error('Unable to save check progress:', error.message))
 			});
-			if (abortController.signal.aborted) continue;
 			await completeCheck(claimed.check, result);
 			await maybeFinalizeRun(claimed.check.run);
 			console.log(`Worker ${slot} finished ${claimed.website.url}: ${result.overallStatus}`);
 		} catch (error) {
-			if (abortController.signal.aborted) {
-				console.log(`Worker ${slot} stopped ${claimed.website.url}: run cancelled.`);
-				continue;
-			}
 			console.error(`Worker ${slot} failed checking ${claimed.website.url}:`, error);
 			try {
 				await failCheck(claimed.check, error);
@@ -73,8 +48,6 @@ async function loop(browser, slot) {
 			} catch (queueError) {
 				console.error(`Worker ${slot} could not save the failed check:`, queueError);
 			}
-		} finally {
-			clearInterval(cancellationWatcher);
 		}
 	}
 }

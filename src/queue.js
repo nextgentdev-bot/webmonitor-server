@@ -18,7 +18,16 @@ export async function recoverStaleChecks() {
 	}
 	return staleChecks.length;
 }
-export async function updateCheckProgress(checkId, { percent, stage }) { return Check.findOneAndUpdate({ _id: checkId, status: 'processing' }, { $max: { progressPercent: Math.max(0, Math.min(100, percent)) }, $set: { progressStage: stage, lockedAt: new Date() } }); }
+export async function updateCheckProgress(checkId, { percent, stage, mobileProgressPercent }) {
+	const update = {
+		$max: { progressPercent: Math.max(0, Math.min(100, percent)) },
+		$set: { progressStage: stage, lockedAt: new Date() }
+	};
+	if (Number.isFinite(mobileProgressPercent)) {
+		update.$max.mobileProgressPercent = Math.max(0, Math.min(100, mobileProgressPercent));
+	}
+	return Check.findOneAndUpdate({ _id: checkId, status: 'processing' }, update);
+}
 export async function completeCheck(check, result) { const updated = await Check.findOneAndUpdate({ _id: check._id, status: 'processing' }, { $set: { status: result.overallStatus, progressPercent: 100, progressStage: 'Complete', finishedAt: new Date(), homepage: result.homepage, desktop: result.desktop, mobile: result.mobile, issues: result.issues, screenshots: result.screenshots, rawResult: result, errorSummary: result.issues.join('\n'), lockedAt: null, lockedBy: null } }); if (updated) await Website.findByIdAndUpdate(check.website, { lastCheck: check._id }); }
 export async function failCheck(check, error) { const message = String(error?.stack || error?.message || error).slice(0, 8000); if (check.attempts < config.maxRetries) return Check.findOneAndUpdate({ _id: check._id, status: 'processing' }, { $set: { status: 'pending', progressPercent: 0, progressStage: 'Retry queued', scheduledAt: new Date(Date.now() + config.retryDelaySeconds * 1000), errorSummary: `Retry scheduled: ${message}`, lockedAt: null, lockedBy: null } }); return Check.findOneAndUpdate({ _id: check._id, status: 'processing' }, { $set: { status: 'critical', progressPercent: 100, progressStage: 'Failed', finishedAt: new Date(), errorSummary: message, lockedAt: null, lockedBy: null } }); }
 export async function cancelRun(runId) { const now = new Date(); const run = await Run.findOneAndUpdate({ _id: runId, status: 'running' }, { $set: { status: 'cancelled', finishedAt: now } }, { new: true }); if (!run) return null; await Check.updateMany({ run: runId, status: { $in: ['pending', 'processing'] } }, { $set: { status: 'cancelled', progressStage: 'Cancelled', finishedAt: now, lockedAt: null, lockedBy: null } }); return run; }

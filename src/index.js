@@ -100,19 +100,20 @@ app.get('/api/dashboard', async (req, res, next) => {
 		const latestRunIsStale = Boolean(latestRun && newestActiveWebsite && newestActiveWebsite.createdAt > latestRun.startedAt);
 		const healthy = countHealthyWebsites(progressWebsites);
 		const progressRun = activeRun || latestRun;
-		const runChecks = progressRun ? await Check.find({ run: progressRun._id }).select('website status startedAt progressPercent progressStage').lean() : [];
+		const runChecks = progressRun ? await Check.find({ run: progressRun._id }).select('website status startedAt progressPercent progressStage mobileProgressPercent').lean() : [];
 		const runProgress = summarizeWebsiteProgress(
 			progressWebsites.map((website) => ({ websiteId: String(website._id), lastCheck: website.lastCheck })),
 			runChecks.map((check) => ({
 				websiteId: String(check.website),
 				status: check.status,
 				progressPercent: check.progressPercent || 0,
-				progressStage: check.progressStage || 'Queued'
+				progressStage: check.progressStage || 'Queued',
+				mobileProgressPercent: check.mobileProgressPercent || 0
 			})),
 			progressRun?.status
 		);
 		runProgress.runId = progressRun ? String(progressRun._id) : null;
-		const checksByWebsite = new Map(runChecks.map((check) => [String(check.website), { status: check.status, startedAt: check.startedAt, progressPercent: check.progressPercent || 0, progressStage: check.progressStage || 'Queued' }]));
+		const checksByWebsite = new Map(runChecks.map((check) => [String(check.website), { status: check.status, startedAt: check.startedAt, progressPercent: check.progressPercent || 0, progressStage: check.progressStage || 'Queued', mobileProgressPercent: check.mobileProgressPercent || 0 }]));
 		const dashboardWebsites = websites.map((website) => ({
 			...website,
 			...(website.active && progressRun && checksByWebsite.has(String(website._id)) ? { currentCheck: checksByWebsite.get(String(website._id)) } : {})
@@ -163,24 +164,25 @@ app.get('/api/runs/:id/progress', async (req, res, next) => {
 	try {
 		const [run, progressWebsites] = await Promise.all([
 			Run.findById(req.params.id).select('status').lean(),
-			Website.find().select('lastCheck').populate('lastCheck', 'status progressPercent').lean()
+			Website.find().select('lastCheck').populate('lastCheck', 'status progressPercent mobileProgressPercent').lean()
 		]);
 		if (!run) return res.status(404).json({ error: 'Run not found.' });
-		const checks = await Check.find({ run: req.params.id }).select('website status progressPercent progressStage').lean();
+		const checks = await Check.find({ run: req.params.id }).select('website status progressPercent progressStage mobileProgressPercent').lean();
 		const progress = summarizeWebsiteProgress(
 			progressWebsites.map((website) => ({ websiteId: String(website._id), lastCheck: website.lastCheck })),
 			checks.map((check) => ({
 				websiteId: String(check.website),
 				status: check.status,
 				progressPercent: check.progressPercent || 0,
-				progressStage: check.progressStage || 'Queued'
+				progressStage: check.progressStage || 'Queued',
+				mobileProgressPercent: check.mobileProgressPercent || 0
 			})),
 			run.status
 		);
 		res.json({
 			...progress,
 			runId: String(req.params.id),
-			checks: checks.map((check) => ({ websiteId: String(check.website), status: check.status, progressPercent: check.progressPercent || 0, progressStage: check.progressStage || 'Queued' }))
+			checks: checks.map((check) => ({ websiteId: String(check.website), status: check.status, progressPercent: check.progressPercent || 0, progressStage: check.progressStage || 'Queued', mobileProgressPercent: check.mobileProgressPercent || 0 }))
 		});
 	} catch (error) { next(error); }
 });

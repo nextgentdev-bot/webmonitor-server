@@ -14,6 +14,7 @@ const checkSchema = new mongoose.Schema({
   status: { type: String, enum: ['pending', 'processing', 'healthy', 'warning', 'critical', 'cancelled'], default: 'pending', index: true },
   attempts: { type: Number, default: 0 },
   progressPercent: { type: Number, default: 0 },
+  mobileProgressPercent: { type: Number, default: 0 },
   progressStage: { type: String, default: 'Queued' },
   scheduledAt: { type: Date, default: Date.now },
   lockedAt: Date,

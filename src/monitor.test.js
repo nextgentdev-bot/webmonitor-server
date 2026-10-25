@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isMobileMenuControlLabel, matchesMenuLabel, normalizeMenuLabel } from './monitor.js';
+import { getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult } from './monitor.js';
 import { countHealthyWebsites, defaultGoogleSheetTab, parseGoogleSheetRows, summarizeWebsiteProgress } from './utils.js';
 
 test('normalizes mixed Bengali and English navigation labels', () => {
@@ -27,6 +27,60 @@ test('matches Bengali contact and news labels', () => {
   assert.equal(matchesMenuLabel('ব্লগ', 'news'), true);
   assert.equal(matchesMenuLabel(normalizeMenuLabel(['ব্লগ', null, null].filter(Boolean).join(' ')), 'news'), true);
   assert.equal(matchesMenuLabel('ইসলামিক পোস্ট', 'news'), false);
+});
+
+test('matches Portuguese, Spanish, French, Arabic and Japanese menu labels', () => {
+  assert.equal(matchesMenuLabel('Contate-nos', 'contact'), true);
+  assert.equal(matchesMenuLabel('Fale conosco', 'contact'), true);
+  assert.equal(matchesMenuLabel('Contáctanos', 'contact'), true);
+  assert.equal(matchesMenuLabel('Nous contacter', 'contact'), true);
+  assert.equal(matchesMenuLabel('اتصل بنا', 'contact'), true);
+  assert.equal(matchesMenuLabel('お問い合わせ', 'contact'), true);
+  assert.equal(matchesMenuLabel('Notícias', 'news'), true);
+  assert.equal(matchesMenuLabel('Actualités', 'news'), true);
+  assert.equal(matchesMenuLabel('Новости', 'news'), true);
+  assert.equal(matchesMenuLabel('新闻', 'news'), true);
+  assert.equal(matchesMenuLabel('Επικοινωνία', 'contact'), true);
+  assert.equal(matchesMenuLabel('ข่าว', 'news'), true);
+});
+
+test('counts only the same-domain root news page', () => {
+  const homepage = 'https://joinpd.io/';
+  assert.equal(isMainNewsPath('/news', homepage), true);
+  assert.equal(isMainNewsPath('/news/', homepage), true);
+  assert.equal(isMainNewsPath('https://joinpd.io/news?sort=latest', homepage), true);
+  assert.equal(isMainNewsPath('/notícias', homepage), true);
+  assert.equal(isMainNewsPath('/actualités/', homepage), true);
+  assert.equal(isMainNewsPath('/%D8%A3%D8%AE%D8%A8%D8%A7%D8%B1', homepage), true);
+  assert.equal(isMainNewsPath('/ειδήσεις', homepage), true);
+  assert.equal(isMainNewsPath('/category/news/', homepage), false);
+  assert.equal(isMainNewsPath('/categoria/noticias/', homepage), false);
+  assert.equal(isMainNewsPath('/news/latest', homepage), false);
+  assert.equal(isMainNewsPath('https://other.example/news', homepage), false);
+});
+
+test('identifies category/news links to ignore without checking them', () => {
+  const homepage = 'https://baddie-hub.net/';
+  assert.equal(isIgnoredNewsCategoryPath('/category/news/', homepage), true);
+  assert.equal(isIgnoredNewsCategoryPath('https://baddie-hub.net/category/news', homepage), true);
+  assert.equal(isIgnoredNewsCategoryPath('/category/news/article-one/', homepage), false);
+  assert.equal(isIgnoredNewsCategoryPath('https://other.example/category/news/', homepage), false);
+  assert.equal(isIgnoredNewsCategoryPath('/news/', homepage), false);
+});
+
+test('classifies slow and navigation-timeout homepages as warnings, not critical failures', () => {
+  assert.equal(getOverallStatus({ statusCode: 200, loadTimeMs: 12000, sslValid: true }, ['Main website is slow (12000 ms).']), 'warning');
+  assert.equal(getOverallStatus({ statusCode: null, timedOut: true, sslValid: true }, ['Main website exceeded the navigation timeout.']), 'warning');
+  assert.equal(getOverallStatus({ statusCode: 200, sslValid: true }, []), 'healthy');
+  assert.equal(getOverallStatus({ statusCode: null, timedOut: false, sslValid: true }, ['Main website could not be opened.']), 'critical');
+  assert.equal(getOverallStatus({ statusCode: 503, sslValid: true }, ['Main website returned HTTP 503.']), 'critical');
+});
+
+test('ignores absent News navigation only when the main-domain /news page does not exist', () => {
+  assert.equal(resolveNewsCheckResult({ status: 'missing' }, true).status, 'missing');
+  assert.equal(resolveNewsCheckResult({ status: 'missing' }, false).status, 'skipped');
+  assert.equal(resolveNewsCheckResult({ status: 'working' }, false).status, 'working');
+  assert.equal(resolveNewsCheckResult({ status: 'error' }, false).status, 'error');
 });
 
 test('recognizes English and Bengali mobile menu controls', () => {
