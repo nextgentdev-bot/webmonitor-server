@@ -1,5 +1,3 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { config } from './config.js';
 
 const navigationSelectors = [
@@ -247,14 +245,6 @@ async function checkMainNewsPage(context, homepageUrl) {
   }
 }
 
-async function screenshot(page, runId, website, mode) {
-  const dir = path.join(config.screenshotDir, `run-${runId}`);
-  await fs.mkdir(dir, { recursive: true });
-  const file = path.join(dir, `${website._id}-${website.name.replace(/[^a-z0-9_-]/gi, '-').slice(0, 60)}-${mode}.png`);
-  await page.screenshot({ path: file, fullPage: true, animations: 'disabled' });
-  return `/screenshots/${path.relative(config.screenshotDir, file).replaceAll(path.sep, '/')}`;
-}
-
 export function getHomepageCandidates(url) {
   const candidates = new Set();
   const trimmed = String(url || '').trim();
@@ -398,9 +388,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
   }
 
   const status = getOverallStatus(homepage, issues);
-  let screenshots = [];
-  if (config.screenshotOnIssue && status !== 'healthy') screenshots = [await screenshot(desktop, runId, website, 'desktop').catch(() => null)].filter(Boolean);
   signal?.removeEventListener('abort', closeContexts);
   await Promise.all(contexts.map((context) => context.close()));
-  return { overallStatus: status, homepage, desktop: desktopResult, mobile: finalMobileResult, issues, screenshots };
+  return { overallStatus: status, homepage, desktop: desktopResult, mobile: finalMobileResult, issues, screenshots: [] };
 }

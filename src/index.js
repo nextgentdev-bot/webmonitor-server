@@ -12,7 +12,7 @@ import { countHealthyWebsites, defaultGoogleSheetTab, nameFromUrl, normalizeUrl,
 import { startScheduler } from './scheduler.js';
 
 const app = express(); const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
-app.use(cors({ origin: config.clientOrigin })); app.use(express.json({ limit: '2mb' })); app.use('/screenshots', express.static(config.screenshotDir));
+app.use(cors({ origin: config.clientOrigin })); app.use(express.json({ limit: '2mb' }));
 function googleSheetCsvUrl(input) {
 	const value = String(input || '').trim();
 	const match = value.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);

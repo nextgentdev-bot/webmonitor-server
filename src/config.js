@@ -21,8 +21,6 @@ export const config = {
   maxRetries: Math.max(1, number('MAX_RETRIES', 2)),
   retryDelaySeconds: Math.max(10, number('RETRY_DELAY_SECONDS', 120)),
   slowPageMs: number('SLOW_PAGE_MS', 7000),
-  screenshotOnIssue: bool('SCREENSHOT_ON_ISSUE', true),
-  screenshotDir: path.resolve(process.env.SCREENSHOT_DIR || './data/screenshots'),
   defaultDailyTime: process.env.DEFAULT_DAILY_TIME || '02:00',
   defaultTimezone: process.env.DEFAULT_TIMEZONE || 'Asia/Dhaka',
   instantAlertsDefault: bool('INSTANT_ALERTS', true),
