@@ -108,6 +108,7 @@ app.post('/api/google-sheets/create', async (req, res, next) => {
 	try {
 		await ensureWebsiteOrder();
 		const websites = await Website.find().sort({ sortOrder: 1, _id: 1 }).limit(config.maxWebsites).populate('lastCheck').lean();
+		if (!websites.length) return res.status(400).json({ error: 'Add at least one website before creating a results sheet.' });
 		res.status(201).json(await createResultsSheet(websites, req.body));
 	} catch (error) { next(error); }
 });

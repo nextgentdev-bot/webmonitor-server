@@ -65,9 +65,11 @@ test('creates a results sheet and updates completed check rows', async () => {
   const storedSettings = new Map();
   const sheetWrites = [];
   const sheetClears = [];
-  const addedResultTabs = [];
   let spreadsheetCreates = 0;
-  let existingResultsTab = false;
+  let dateTabTitle = '';
+  let dateTabSheetId = 9;
+  let hasDateTab = false;
+  const dateTabAddRequests = [];
   config.googleOAuthClientId = 'client-id';
   config.googleOAuthClientSecret = 'client-secret';
   config.googleOAuthRedirectUri = 'https://api.example.com/api/google-sheets/oauth/callback';
@@ -92,13 +94,15 @@ test('creates a results sheet and updates completed check rows', async () => {
     }
     if (url === 'https://sheets.googleapis.com/v4/spreadsheets' && options.method === 'POST') {
       spreadsheetCreates += 1;
+      dateTabTitle = JSON.parse(options.body).sheets[0].properties.title;
+      hasDateTab = true;
       return {
         ok: true,
         status: 200,
         json: async () => ({
           spreadsheetId: 'created-sheet',
           spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/created-sheet/edit',
-          sheets: [{ properties: { sheetId: 0 } }]
+          sheets: [{ properties: { sheetId: 0, title: dateTabTitle } }]
         })
       };
     }
@@ -109,7 +113,7 @@ test('creates a results sheet and updates completed check rows', async () => {
         json: async () => ({
           spreadsheetId: 'created-sheet',
           spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/created-sheet/edit',
-          sheets: [{ properties: { sheetId: 0, title: 'Results' } }]
+          sheets: [{ properties: { sheetId: 0, title: dateTabTitle } }]
         })
       };
     }
@@ -120,18 +124,23 @@ test('creates a results sheet and updates completed check rows', async () => {
         json: async () => ({
           spreadsheetId: 'existing-sheet',
           spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/existing-sheet/edit',
-          sheets: existingResultsTab
-            ? [{ properties: { sheetId: 5, title: 'Personal notes' } }, { properties: { sheetId: 6, title: 'Results' } }]
-            : [{ properties: { sheetId: 5, title: 'Personal notes' } }]
+          sheets: [
+            { properties: { sheetId: 5, title: 'Personal notes' } },
+            ...(hasDateTab ? [{ properties: { sheetId: dateTabSheetId, title: dateTabTitle } }] : [])
+          ]
         })
       };
     }
     if (url === 'https://sheets.googleapis.com/v4/spreadsheets/existing-sheet:batchUpdate') {
-      addedResultTabs.push(JSON.parse(options.body));
-      existingResultsTab = true;
+      const request = JSON.parse(options.body).requests[0];
+      if (request.addSheet) {
+        dateTabAddRequests.push(request.addSheet.properties.title);
+        dateTabTitle = request.addSheet.properties.title;
+        hasDateTab = true;
+      }
       return { ok: true, status: 200, json: async () => ({}) };
     }
-    if (url.includes('/values/Results!A:D:clear')) {
+    if (url.includes('/values/') && url.endsWith(':clear')) {
       sheetClears.push(url);
       return { ok: true, status: 200, json: async () => ({}) };
     }
@@ -145,6 +154,9 @@ test('creates a results sheet and updates completed check rows', async () => {
 
   try {
     await exchangeGoogleAuthorizationCode('authorization-code');
+    await assert.rejects(createResultsSheet([]), /Add at least one website before creating a results sheet/);
+    assert.equal(spreadsheetCreates, 0);
+
     const created = await createResultsSheet([{
       name: 'Example',
       url: 'https://example.com',
@@ -156,10 +168,11 @@ test('creates a results sheet and updates completed check rows', async () => {
       }
     }]);
     assert.equal(created.created, true);
-    assert.equal(created.spreadsheetUrl, 'https://docs.google.com/spreadsheets/d/created-sheet/edit');
-    assert.deepEqual(sheetWrites[0].body.values, [
-      ['Website Name', 'Website URL', 'Status', 'Issue'],
-      ['Example', 'https://example.com', 'Site OK', '']
+    assert.equal(created.spreadsheetUrl, `https://docs.google.com/spreadsheets/d/created-sheet/edit#gid=0`);
+    assert.match(dateTabTitle, /^\d{4}-\d{2}-\d{2}$/);
+    assert.deepEqual(sheetWrites[1].body.values, [
+      ['Website URL', 'Status', 'Issue'],
+      ['https://example.com', 'Site OK', '']
     ]);
 
     await syncWebsiteStatusToSheet({ name: 'Example', url: 'https://example.com', sortOrder: 0 }, {
@@ -167,8 +180,8 @@ test('creates a results sheet and updates completed check rows', async () => {
       desktop: { contact: { status: 'missing' } },
       mobile: {}
     });
-    assert.match(sheetWrites[1].url, /Results!A2:D2/);
-    assert.deepEqual(sheetWrites[1].body.values, [['Example', 'https://example.com', 'Issue found', 'Desktop Contact: Not found']]);
+    assert.match(sheetWrites[3].url, new RegExp(`'${dateTabTitle}'!A2:C2`));
+    assert.deepEqual(sheetWrites[3].body.values, [['https://example.com', 'Issue found', 'Desktop Contact: Not found']]);
 
     const updated = await createResultsSheet([{
       name: 'Example',
@@ -180,11 +193,12 @@ test('creates a results sheet and updates completed check rows', async () => {
     assert.equal(updated.spreadsheetUrl, created.spreadsheetUrl);
     assert.equal(spreadsheetCreates, 1);
     assert.equal(sheetClears.length, 2);
-    assert.deepEqual(sheetWrites[2].body.values, [
-      ['Website Name', 'Website URL', 'Status', 'Issue'],
-      ['Example', 'https://example.com', 'Issue found', 'Desktop Contact: Not found']
+    assert.deepEqual(sheetWrites[5].body.values, [
+      ['Website URL', 'Status', 'Issue'],
+      ['https://example.com', 'Issue found', 'Desktop Contact: Not found']
     ]);
 
+    hasDateTab = false;
     const selectedExisting = await createResultsSheet([{
       name: 'Example',
       url: 'https://example.com',
@@ -195,15 +209,28 @@ test('creates a results sheet and updates completed check rows', async () => {
       spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/existing-sheet/edit#gid=5'
     });
     assert.equal(selectedExisting.created, false);
-    assert.equal(selectedExisting.spreadsheetUrl, 'https://docs.google.com/spreadsheets/d/existing-sheet/edit');
-    assert.deepEqual(addedResultTabs[0].requests, [{ addSheet: { properties: { title: 'Results' } } }]);
-    assert.deepEqual(sheetWrites[3].body.values, [
-      ['Website Name', 'Website URL', 'Status', 'Issue'],
-      ['Example', 'https://example.com', 'Site OK', '']
+    assert.equal(selectedExisting.spreadsheetUrl, `https://docs.google.com/spreadsheets/d/existing-sheet/edit#gid=${dateTabSheetId}`);
+    assert.deepEqual(dateTabAddRequests, [dateTabTitle]);
+    assert.deepEqual(sheetWrites[7].body.values, [
+      ['Website URL', 'Status', 'Issue'],
+      ['https://example.com', 'Site OK', '']
     ]);
 
+    await syncWebsiteStatusToSheet({ name: 'Example', url: 'https://example.com', sortOrder: 0 }, {
+      homepage,
+      desktop: { contact: { status: 'missing' } },
+      mobile: {}
+    });
+    assert.match(sheetWrites[9].url, new RegExp(`spreadsheets/existing-sheet/values/'${dateTabTitle}'!A2:C2`));
+    assert.deepEqual(sheetWrites[9].body.values, [['https://example.com', 'Issue found', 'Desktop Contact: Not found']]);
+
     await disableGoogleSheetSync();
-    const recreatedSync = await createResultsSheet([]);
+    const recreatedSync = await createResultsSheet([{
+      name: 'Example',
+      url: 'https://example.com',
+      sortOrder: 0,
+      lastCheck: { homepage, desktop: { contact: { status: 'working' } }, mobile: {} }
+    }]);
     assert.equal(recreatedSync.created, false);
     assert.equal(recreatedSync.spreadsheetUrl, selectedExisting.spreadsheetUrl);
     assert.equal(spreadsheetCreates, 1);
