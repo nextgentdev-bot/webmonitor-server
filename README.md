@@ -33,7 +33,9 @@ Website entry and import (single website, bulk URLs, and Google Sheets import) c
 4. Set the same three variables in local `server/.env` when testing locally. For local use, register `http://localhost:4000/api/google-sheets/oauth/callback`.
 5. Sign in to the dashboard, select **Connect Google account**, then create the results sheet. The sheet is private in the connected account's Drive; the dashboard provides a copy-URL button.
 
-The generated sheet contains website URL and status columns. Existing websites and their latest results are included; completed future checks update their rows. Healthy checks and checks with only a slow-page warning show `Site OK`. Homepage, SSL, contact, and news problems show a short summary. The account refresh token is encrypted in MongoDB using `JWT_SECRET`; use the same JWT secret for the API and worker. Stopping sync leaves the user's Google Sheet intact.
+The results sheet contains website name, website URL, status, and issue columns. Existing websites and their latest results are included; completed future checks update their rows. Healthy checks and checks with only a slow-page warning show `Site OK`. Homepage, SSL, contact, and news problems show `Issue found` with a short summary in the issue column. Choose to create a new results sheet, update the current one, or use an existing spreadsheet URL. For an existing spreadsheet, the API creates a `Results` tab if needed and replaces only columns A-D in that tab; other tabs are left unchanged, and the connected Google account needs edit access. The account refresh token is encrypted in MongoDB using `JWT_SECRET`; use the same JWT secret for the API and worker. Stopping sync leaves the user's Google Sheet intact.
+
+After making a new or existing sheet active, the dashboard defaults to updating that current sheet on subsequent submissions. Selecting **Create a new sheet** explicitly switches sync to a separate spreadsheet.
 
 ## Important runtime limitation
 

@@ -122,6 +122,46 @@ function compactError(error) {
   return 'Check failed';
 }
 
+function googleSheetRow(website, result) {
+  const summary = result ? formatGoogleSheetStatus(result) : 'Not checked';
+  return [
+    website.name || website.url,
+    website.url,
+    summary === 'Site OK' ? 'Site OK' : result ? 'Issue found' : 'Not checked',
+    summary === 'Site OK' || !result ? '' : summary
+  ];
+}
+
+function spreadsheetIdFromUrl(input) {
+  let url;
+  try {
+    url = new URL(String(input || ''));
+  } catch {
+    throw new Error('Enter a valid Google Sheets URL.');
+  }
+  const match = url.protocol === 'https:' && url.hostname === 'docs.google.com' && url.pathname.match(/^\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (!match) throw new Error('Enter a Google Sheets URL in the format https://docs.google.com/spreadsheets/d/...');
+  return match[1];
+}
+
+async function writeResultsRows(spreadsheetId, rows, token) {
+  const encodedId = encodeURIComponent(spreadsheetId);
+  const metadata = await sheetsRequest(`${sheetsApi}/${encodedId}`, token);
+  const hasResultsTab = metadata.sheets?.some(({ properties }) => properties?.title === 'Results');
+  if (!hasResultsTab) {
+    await sheetsRequest(`${sheetsApi}/${encodedId}:batchUpdate`, token, {
+      method: 'POST',
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: 'Results' } } }] })
+    });
+  }
+  await sheetsRequest(`${sheetsApi}/${encodedId}/values/Results!A:D:clear`, token, { method: 'POST', body: JSON.stringify({}) });
+  await sheetsRequest(`${sheetsApi}/${encodedId}/values/Results!A1:D${rows.length}?valueInputOption=RAW`, token, {
+    method: 'PUT',
+    body: JSON.stringify({ values: rows })
+  });
+  return metadata.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
+}
+
 export function googleSheetsConfigured() {
   return Boolean(config.googleOAuthClientId && config.googleOAuthClientSecret && config.googleOAuthRedirectUri);
 }
@@ -187,9 +227,32 @@ async function connectedAccount() {
   return { values, token: await accessToken(decryptSecret(values.refreshToken)) };
 }
 
-export async function createResultsSheet(websites) {
+export async function createResultsSheet(websites, { mode = 'reuse', spreadsheetUrl: requestedSpreadsheetUrl = '' } = {}) {
   const { values, token } = await connectedAccount();
-  if (values.spreadsheetId && values.spreadsheetUrl) return { spreadsheetUrl: values.spreadsheetUrl, created: false };
+  if (!['reuse', 'new', 'existing'].includes(mode)) throw new Error('Choose whether to create a new sheet or use an existing sheet.');
+  if (mode === 'existing' && !requestedSpreadsheetUrl) throw new Error('Paste the Google Sheets URL you want to use.');
+  const existingSpreadsheetId = mode === 'existing'
+    ? spreadsheetIdFromUrl(requestedSpreadsheetUrl)
+    : mode === 'reuse' ? values.spreadsheetId || values.lastSpreadsheetId : null;
+  const orderedWebsites = [...websites].sort((first, second) => first.sortOrder - second.sortOrder);
+  const lastRow = orderedWebsites.reduce((max, website) => Math.max(max, Number.isInteger(website.sortOrder) && website.sortOrder >= 0 ? website.sortOrder + 2 : max), 1);
+  const rows = Array.from({ length: lastRow }, () => ['', '', '', '']);
+  rows[0] = ['Website Name', 'Website URL', 'Status', 'Issue'];
+  for (const website of orderedWebsites) {
+    const rowIndex = Number.isInteger(website.sortOrder) && website.sortOrder >= 0 ? website.sortOrder + 1 : rows.length;
+    rows[rowIndex] = googleSheetRow(website, website.lastCheck);
+  }
+
+  if (existingSpreadsheetId) {
+    const spreadsheetUrl = await writeResultsRows(existingSpreadsheetId, rows, token);
+    await saveSettings({
+      spreadsheetId: existingSpreadsheetId,
+      spreadsheetUrl,
+      lastSpreadsheetId: existingSpreadsheetId,
+      lastSpreadsheetUrl: spreadsheetUrl
+    });
+    return { spreadsheetUrl, created: false };
+  }
 
   const spreadsheet = await sheetsRequest(sheetsApi, token, {
     method: 'POST',
@@ -198,26 +261,19 @@ export async function createResultsSheet(websites) {
       sheets: [{
         properties: {
           title: 'Results',
-          gridProperties: { frozenRowCount: 1, rowCount: Math.max(config.maxWebsites + 1, 1000), columnCount: 2 }
+          gridProperties: { frozenRowCount: 1, rowCount: Math.max(config.maxWebsites + 1, 1000), columnCount: 4 }
         }
       }]
     })
   });
   const spreadsheetUrl = spreadsheet.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${spreadsheet.spreadsheetId}/edit`;
-  await saveSettings({ spreadsheetId: spreadsheet.spreadsheetId, spreadsheetUrl });
-
-  const orderedWebsites = [...websites].sort((first, second) => first.sortOrder - second.sortOrder);
-  const lastRow = orderedWebsites.reduce((max, website) => Math.max(max, Number.isInteger(website.sortOrder) && website.sortOrder >= 0 ? website.sortOrder + 2 : max), 1);
-  const rows = Array.from({ length: lastRow }, () => ['', '']);
-  rows[0] = ['Website URL', 'Status'];
-  for (const website of orderedWebsites) {
-    const rowIndex = Number.isInteger(website.sortOrder) && website.sortOrder >= 0 ? website.sortOrder + 1 : rows.length;
-    rows[rowIndex] = [website.url, website.lastCheck ? formatGoogleSheetStatus(website.lastCheck) : 'Not checked'];
-  }
-  await sheetsRequest(`${sheetsApi}/${encodeURIComponent(spreadsheet.spreadsheetId)}/values/Results!A1:B${rows.length}?valueInputOption=RAW`, token, {
-    method: 'PUT',
-    body: JSON.stringify({ values: rows })
+  await saveSettings({
+    spreadsheetId: spreadsheet.spreadsheetId,
+    spreadsheetUrl,
+    lastSpreadsheetId: spreadsheet.spreadsheetId,
+    lastSpreadsheetUrl: spreadsheetUrl
   });
+  await writeResultsRows(spreadsheet.spreadsheetId, rows, token);
   await sheetsRequest(`${sheetsApi}/${encodeURIComponent(spreadsheet.spreadsheetId)}:batchUpdate`, token, {
     method: 'POST',
     body: JSON.stringify({
@@ -240,19 +296,23 @@ export async function syncWebsiteStatusToSheet(website, result) {
 
   let rowNumber = Number.isInteger(website.sortOrder) && website.sortOrder >= 0 ? website.sortOrder + 2 : null;
   if (rowNumber === null) {
-    const data = await sheetsRequest(`${sheetsApi}/${encodeURIComponent(values.spreadsheetId)}/values/Results!A:A`, token);
+    const data = await sheetsRequest(`${sheetsApi}/${encodeURIComponent(values.spreadsheetId)}/values/Results!B:B`, token);
     const url = normalizeUrl(website.url);
     rowNumber = (data.values || []).findIndex((row, index) => index > 0 && safeNormalizeUrl(row[0]) === url) + 1;
     if (rowNumber < 2) throw new Error(`Website row was not found in the results sheet: ${website.url}`);
   }
-  await sheetsRequest(`${sheetsApi}/${encodeURIComponent(values.spreadsheetId)}/values/Results!A${rowNumber}:B${rowNumber}?valueInputOption=RAW`, token, {
+  await sheetsRequest(`${sheetsApi}/${encodeURIComponent(values.spreadsheetId)}/values/Results!A${rowNumber}:D${rowNumber}?valueInputOption=RAW`, token, {
     method: 'PUT',
-    body: JSON.stringify({ values: [[website.url, formatGoogleSheetStatus(result)]] })
+    body: JSON.stringify({ values: [googleSheetRow(website, result)] })
   });
   return true;
 }
 
 export async function disableGoogleSheetSync() {
+  const values = await readSettings();
+  if (values.spreadsheetId && values.spreadsheetUrl) {
+    await saveSettings({ lastSpreadsheetId: values.spreadsheetId, lastSpreadsheetUrl: values.spreadsheetUrl });
+  }
   await Setting.deleteMany({ key: { $in: ['googleSheets:spreadsheetId', 'googleSheets:spreadsheetUrl'] } });
 }
 

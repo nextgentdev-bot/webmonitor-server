@@ -104,11 +104,11 @@ app.get('/api/google-sheets/oauth/url', (req, res, next) => {
 		res.json({ url: createGoogleAuthorizationUrl(state) });
 	} catch (error) { next(error); }
 });
-app.post('/api/google-sheets/create', async (_req, res, next) => {
+app.post('/api/google-sheets/create', async (req, res, next) => {
 	try {
 		await ensureWebsiteOrder();
 		const websites = await Website.find().sort({ sortOrder: 1, _id: 1 }).limit(config.maxWebsites).populate('lastCheck').lean();
-		res.status(201).json(await createResultsSheet(websites));
+		res.status(201).json(await createResultsSheet(websites, req.body));
 	} catch (error) { next(error); }
 });
 app.delete('/api/google-sheets/sync', async (_req, res, next) => {

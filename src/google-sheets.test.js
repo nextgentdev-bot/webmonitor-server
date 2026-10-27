@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { config } from './config.js';
 import { Setting } from './models.js';
-import { createGoogleAuthorizationUrl, createResultsSheet, exchangeGoogleAuthorizationCode, formatGoogleSheetStatus, syncWebsiteStatusToSheet } from './google-sheets.js';
+import { createGoogleAuthorizationUrl, createResultsSheet, disableGoogleSheetSync, exchangeGoogleAuthorizationCode, formatGoogleSheetStatus, syncWebsiteStatusToSheet } from './google-sheets.js';
 
 const homepage = { statusCode: 200, sslValid: true, blank: false, timedOut: false };
 
@@ -61,13 +61,21 @@ test('creates a results sheet and updates completed check rows', async () => {
   const previousFetch = globalThis.fetch;
   const previousFind = Setting.find;
   const previousFindOneAndUpdate = Setting.findOneAndUpdate;
+  const previousDeleteMany = Setting.deleteMany;
   const storedSettings = new Map();
   const sheetWrites = [];
+  const sheetClears = [];
+  const addedResultTabs = [];
+  let spreadsheetCreates = 0;
+  let existingResultsTab = false;
   config.googleOAuthClientId = 'client-id';
   config.googleOAuthClientSecret = 'client-secret';
   config.googleOAuthRedirectUri = 'https://api.example.com/api/google-sheets/oauth/callback';
   Setting.findOneAndUpdate = async (filter, update) => storedSettings.set(filter.key, update.value);
   Setting.find = () => ({ lean: async () => [...storedSettings].map(([key, value]) => ({ key, value })) });
+  Setting.deleteMany = async ({ key }) => {
+    for (const settingKey of key.$in) storedSettings.delete(settingKey);
+  };
   globalThis.fetch = async (input, options = {}) => {
     const url = String(input);
     if (url === 'https://oauth2.googleapis.com/token') {
@@ -83,6 +91,7 @@ test('creates a results sheet and updates completed check rows', async () => {
       return { ok: true, status: 200, json: async () => ({ email: 'owner@example.com' }) };
     }
     if (url === 'https://sheets.googleapis.com/v4/spreadsheets' && options.method === 'POST') {
+      spreadsheetCreates += 1;
       return {
         ok: true,
         status: 200,
@@ -92,6 +101,39 @@ test('creates a results sheet and updates completed check rows', async () => {
           sheets: [{ properties: { sheetId: 0 } }]
         })
       };
+    }
+    if (url === 'https://sheets.googleapis.com/v4/spreadsheets/created-sheet') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          spreadsheetId: 'created-sheet',
+          spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/created-sheet/edit',
+          sheets: [{ properties: { sheetId: 0, title: 'Results' } }]
+        })
+      };
+    }
+    if (url === 'https://sheets.googleapis.com/v4/spreadsheets/existing-sheet') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          spreadsheetId: 'existing-sheet',
+          spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/existing-sheet/edit',
+          sheets: existingResultsTab
+            ? [{ properties: { sheetId: 5, title: 'Personal notes' } }, { properties: { sheetId: 6, title: 'Results' } }]
+            : [{ properties: { sheetId: 5, title: 'Personal notes' } }]
+        })
+      };
+    }
+    if (url === 'https://sheets.googleapis.com/v4/spreadsheets/existing-sheet:batchUpdate') {
+      addedResultTabs.push(JSON.parse(options.body));
+      existingResultsTab = true;
+      return { ok: true, status: 200, json: async () => ({}) };
+    }
+    if (url.includes('/values/Results!A:D:clear')) {
+      sheetClears.push(url);
+      return { ok: true, status: 200, json: async () => ({}) };
     }
     if (url.includes(':batchUpdate')) return { ok: true, status: 200, json: async () => ({}) };
     if (url.includes('/values/')) {
@@ -104,6 +146,7 @@ test('creates a results sheet and updates completed check rows', async () => {
   try {
     await exchangeGoogleAuthorizationCode('authorization-code');
     const created = await createResultsSheet([{
+      name: 'Example',
       url: 'https://example.com',
       sortOrder: 0,
       lastCheck: {
@@ -114,15 +157,56 @@ test('creates a results sheet and updates completed check rows', async () => {
     }]);
     assert.equal(created.created, true);
     assert.equal(created.spreadsheetUrl, 'https://docs.google.com/spreadsheets/d/created-sheet/edit');
-    assert.deepEqual(sheetWrites[0].body.values, [['Website URL', 'Status'], ['https://example.com', 'Site OK']]);
+    assert.deepEqual(sheetWrites[0].body.values, [
+      ['Website Name', 'Website URL', 'Status', 'Issue'],
+      ['Example', 'https://example.com', 'Site OK', '']
+    ]);
 
-    await syncWebsiteStatusToSheet({ url: 'https://example.com', sortOrder: 0 }, {
+    await syncWebsiteStatusToSheet({ name: 'Example', url: 'https://example.com', sortOrder: 0 }, {
       homepage,
       desktop: { contact: { status: 'missing' } },
       mobile: {}
     });
-    assert.match(sheetWrites[1].url, /Results!A2:B2/);
-    assert.deepEqual(sheetWrites[1].body.values, [['https://example.com', 'Desktop Contact: Not found']]);
+    assert.match(sheetWrites[1].url, /Results!A2:D2/);
+    assert.deepEqual(sheetWrites[1].body.values, [['Example', 'https://example.com', 'Issue found', 'Desktop Contact: Not found']]);
+
+    const updated = await createResultsSheet([{
+      name: 'Example',
+      url: 'https://example.com',
+      sortOrder: 0,
+      lastCheck: { homepage, desktop: { contact: { status: 'missing' } }, mobile: {} }
+    }]);
+    assert.equal(updated.created, false);
+    assert.equal(updated.spreadsheetUrl, created.spreadsheetUrl);
+    assert.equal(spreadsheetCreates, 1);
+    assert.equal(sheetClears.length, 2);
+    assert.deepEqual(sheetWrites[2].body.values, [
+      ['Website Name', 'Website URL', 'Status', 'Issue'],
+      ['Example', 'https://example.com', 'Issue found', 'Desktop Contact: Not found']
+    ]);
+
+    const selectedExisting = await createResultsSheet([{
+      name: 'Example',
+      url: 'https://example.com',
+      sortOrder: 0,
+      lastCheck: { homepage, desktop: { contact: { status: 'working' } }, mobile: {} }
+    }], {
+      mode: 'existing',
+      spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/existing-sheet/edit#gid=5'
+    });
+    assert.equal(selectedExisting.created, false);
+    assert.equal(selectedExisting.spreadsheetUrl, 'https://docs.google.com/spreadsheets/d/existing-sheet/edit');
+    assert.deepEqual(addedResultTabs[0].requests, [{ addSheet: { properties: { title: 'Results' } } }]);
+    assert.deepEqual(sheetWrites[3].body.values, [
+      ['Website Name', 'Website URL', 'Status', 'Issue'],
+      ['Example', 'https://example.com', 'Site OK', '']
+    ]);
+
+    await disableGoogleSheetSync();
+    const recreatedSync = await createResultsSheet([]);
+    assert.equal(recreatedSync.created, false);
+    assert.equal(recreatedSync.spreadsheetUrl, selectedExisting.spreadsheetUrl);
+    assert.equal(spreadsheetCreates, 1);
   } finally {
     config.googleOAuthClientId = previousConfig.clientId;
     config.googleOAuthClientSecret = previousConfig.clientSecret;
@@ -130,5 +214,6 @@ test('creates a results sheet and updates completed check rows', async () => {
     globalThis.fetch = previousFetch;
     Setting.find = previousFind;
     Setting.findOneAndUpdate = previousFindOneAndUpdate;
+    Setting.deleteMany = previousDeleteMany;
   }
 });
