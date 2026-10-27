@@ -5,6 +5,7 @@ import { config } from './config.js';
 import { Setting } from './models.js';
 import { claimNextCheck, completeCheck, failCheck, maybeFinalizeRun, recoverStaleChecks, updateCheckProgress } from './queue.js';
 import { monitorWebsite } from './monitor.js';
+import { syncWebsiteStatusToSheet } from './google-sheets.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let stopping = false;
@@ -38,6 +39,13 @@ async function loop(browser, slot) {
 				onProgress: (progress) => updateCheckProgress(claimed.check._id, progress).catch((error) => console.error('Unable to save check progress:', error.message))
 			});
 			await completeCheck(claimed.check, result);
+			try {
+				if (await syncWebsiteStatusToSheet(claimed.website, result)) {
+					console.log(`Worker ${slot} synced Google Sheet status for ${claimed.website.url}.`);
+				}
+			} catch (error) {
+				console.error(`Worker ${slot} could not sync Google Sheet status for ${claimed.website.url}:`, error.message);
+			}
 			await maybeFinalizeRun(claimed.check.run);
 			console.log(`Worker ${slot} finished ${claimed.website.url}: ${result.overallStatus}`);
 		} catch (error) {

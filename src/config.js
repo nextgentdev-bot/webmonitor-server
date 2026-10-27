@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.env'), override: true });
+dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.env') });
 
 const number = (key, fallback) => Number.isFinite(Number(process.env[key])) ? Number(process.env[key]) : fallback;
 const bool = (key, fallback) => process.env[key] == null ? fallback : ['1', 'true', 'yes', 'on'].includes(process.env[key].toLowerCase());
@@ -21,6 +21,9 @@ export const config = {
   maxRetries: Math.max(1, number('MAX_RETRIES', 2)),
   retryDelaySeconds: Math.max(10, number('RETRY_DELAY_SECONDS', 120)),
   slowPageMs: number('SLOW_PAGE_MS', 7000),
+  googleOAuthClientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+  googleOAuthClientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || '',
+  googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI || '',
   defaultDailyTime: process.env.DEFAULT_DAILY_TIME || '02:00',
   defaultTimezone: process.env.DEFAULT_TIMEZONE || 'Asia/Dhaka',
   instantAlertsDefault: bool('INSTANT_ALERTS', true),

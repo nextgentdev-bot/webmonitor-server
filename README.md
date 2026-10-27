@@ -23,11 +23,23 @@ If the React client is deployed separately, set `VITE_API_URL` in the client Ver
 
 Optional values can be copied from `.env.example` as needed. Set `MAX_WEBSITES` to at least `1000` in Vercel to allow larger inventories. `PORT` is not needed on Vercel; Vercel supplies the serverless request/response lifecycle. Do not paste `.env` values into chat or commit them.
 
+## Optional Google Sheets results
+
+Website entry and import (single website, bulk URLs, and Google Sheets import) continue to work without Google OAuth. To enable the optional private results sheet:
+
+1. Create a Google OAuth web application client and enable the Google Sheets API.
+2. Set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` in the API and persistent worker environments.
+3. Set `GOOGLE_OAUTH_REDIRECT_URI` to the API callback URL, for example `https://your-api.example.com/api/google-sheets/oauth/callback`, and add that exact URL to the OAuth client's authorized redirect URIs.
+4. Set the same three variables in local `server/.env` when testing locally. For local use, register `http://localhost:4000/api/google-sheets/oauth/callback`.
+5. Sign in to the dashboard, select **Connect Google account**, then create the results sheet. The sheet is private in the connected account's Drive; the dashboard provides a copy-URL button.
+
+The generated sheet contains website URL and status columns. Existing websites and their latest results are included; completed future checks update their rows. Healthy checks and checks with only a slow-page warning show `Site OK`. Homepage, SSL, contact, and news problems show a short summary. The account refresh token is encrypted in MongoDB using `JWT_SECRET`; use the same JWT secret for the API and worker. Stopping sync leaves the user's Google Sheet intact.
+
 ## Important runtime limitation
 
 Vercel functions are short-lived and do not run the persistent Playwright worker or the in-process daily scheduler. The API can accept a run and store checks in MongoDB, but the checks will remain queued until `npm run worker` is running on a separate persistent Node host. Run the worker on a service such as Render, Fly.io, Railway, or a VM, with the same MongoDB URI and compatible monitoring settings. The daily scheduler must also run as a single persistent service or an external scheduled job. Do not deploy multiple scheduler copies.
 
-Screenshots written to the function filesystem are ephemeral. Use object storage (for example, S3-compatible storage) before relying on screenshots in production.
+Issue screenshot capture is disabled; monitoring results are stored without screenshot files.
 
 ## Local development
 

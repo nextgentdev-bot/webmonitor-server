@@ -8,7 +8,7 @@
     "start": "node src/index.js",
     "worker": "node src/worker.js",
     "build": "npm run check",
-    "check": "node --check src/index.js && node --check src/worker.js && node --check src/monitor.js",
+    "check": "node --check src/index.js && node --check src/worker.js && node --check src/monitor.js && node --check src/google-sheets.js",
     "test": "node --test"
   },
   "dependencies": {

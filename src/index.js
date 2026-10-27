@@ -3,6 +3,7 @@ import cors from 'cors';
 import multer from 'multer';
 import jwt from 'jsonwebtoken';
 import { DateTime } from 'luxon';
+import { randomBytes } from 'node:crypto';
 import XLSX from 'xlsx';
 import { connectDatabase } from './db.js';
 import { config } from './config.js';
@@ -10,6 +11,7 @@ import { Check, Run, Setting, Website } from './models.js';
 import { cancelRun, enqueueRun, maybeFinalizeRun, runDetails } from './queue.js';
 import { countHealthyWebsites, defaultGoogleSheetTab, nameFromUrl, normalizeUrl, parseBulkText, parseGoogleSheetRows, summarizeWebsiteProgress, toCsv } from './utils.js';
 import { startScheduler } from './scheduler.js';
+import { createGoogleAuthorizationUrl, createResultsSheet, disableGoogleSheetSync, exchangeGoogleAuthorizationCode, googleSheetsStatus } from './google-sheets.js';
 
 const app = express(); const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 app.use(cors({ origin: config.clientOrigin })); app.use(express.json({ limit: '2mb' }));
@@ -36,6 +38,20 @@ async function rowsFromGoogleSheet(input) {
 	return { rows, gid, tab: gid ? `gid=${gid}` : sheetName };
 }
 const auth = (req, res, next) => { const token = req.headers.authorization?.replace('Bearer ', ''); try { req.user = jwt.verify(token, config.jwtSecret); next(); } catch { res.status(401).json({ error: 'Authentication required.' }); } };
+app.get('/api/google-sheets/oauth/callback', async (req, res) => {
+	try {
+		if (req.query.error) return res.redirect(`${config.clientOrigin.replace(/\/$/, '')}/?googleSheets=denied`);
+		const state = jwt.verify(String(req.query.state || ''), config.jwtSecret);
+		if (state.purpose !== 'google-sheets-oauth' || !state.username || !req.query.code) {
+			throw new Error('Google authorization response could not be verified.');
+		}
+		await exchangeGoogleAuthorizationCode(String(req.query.code));
+		res.redirect(`${config.clientOrigin.replace(/\/$/, '')}/?googleSheets=connected`);
+	} catch (error) {
+		console.error('Google Sheets account connection failed:', error.message);
+		res.redirect(`${config.clientOrigin.replace(/\/$/, '')}/?googleSheets=error`);
+	}
+});
 async function failEmptyRunningRuns() {
 	const runningRuns = await Run.find({ status: 'running' }).select('_id').lean();
 	for (const run of runningRuns) {
@@ -81,6 +97,26 @@ app.get('/api/health/ready', async (_req, res, next) => { try { await connectDat
 app.get('/', (_req, res) => res.json({ service: 'web-monitor-api', status: 'online', health: '/api/health', readiness: '/api/health/ready' }));
 app.post('/api/auth/login', (req, res) => { if (req.body.username !== config.adminUser || req.body.password !== config.adminPassword) return res.status(401).json({ error: 'Invalid credentials.' }); res.json({ token: jwt.sign({ username: config.adminUser }, config.jwtSecret, { expiresIn: '10h' }) }); });
 app.use('/api', auth);
+app.get('/api/google-sheets/status', async (_req, res, next) => { try { res.json(await googleSheetsStatus()); } catch (error) { next(error); } });
+app.get('/api/google-sheets/oauth/url', (req, res, next) => {
+	try {
+		const state = jwt.sign({ purpose: 'google-sheets-oauth', username: req.user.username, nonce: randomBytes(16).toString('hex') }, config.jwtSecret, { expiresIn: '10m' });
+		res.json({ url: createGoogleAuthorizationUrl(state) });
+	} catch (error) { next(error); }
+});
+app.post('/api/google-sheets/create', async (_req, res, next) => {
+	try {
+		await ensureWebsiteOrder();
+		const websites = await Website.find().sort({ sortOrder: 1, _id: 1 }).limit(config.maxWebsites).populate('lastCheck').lean();
+		res.status(201).json(await createResultsSheet(websites));
+	} catch (error) { next(error); }
+});
+app.delete('/api/google-sheets/sync', async (_req, res, next) => {
+	try {
+		await disableGoogleSheetSync();
+		res.json({ ok: true });
+	} catch (error) { next(error); }
+});
 app.get('/api/dashboard', async (req, res, next) => {
 	try {
 		await failEmptyRunningRuns();
