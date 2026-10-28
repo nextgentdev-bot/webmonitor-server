@@ -38,13 +38,16 @@ export function defaultGoogleSheetTab(sheetNames) {
 export function countHealthyWebsites(websiteChecks) {
   return websiteChecks.filter(({ active, lastCheck }) => active && lastCheck?.status === 'healthy').length;
 }
-export function summarizeWebsiteProgress(websiteChecks, runChecks, runStatus) {
+export function summarizeWebsiteProgress(websiteChecks, runChecks, runStatus, runTotal = null) {
   const checksByWebsite = new Map(runChecks.map((check) => [check.websiteId, check]));
-  const statuses = websiteChecks.map(({ websiteId, lastCheck }) => checksByWebsite.get(websiteId) || lastCheck);
+  const scopedRun = Number.isFinite(runTotal) && runTotal > 0 && runChecks.length > 0;
+  const statuses = scopedRun
+    ? runChecks
+    : websiteChecks.map(({ websiteId, lastCheck }) => checksByWebsite.get(websiteId) || lastCheck);
   const completed = statuses.filter((check) => ['healthy', 'warning', 'critical'].includes(check?.status)).length;
   const processing = statuses.filter((check) => check?.status === 'processing').length;
   const cancelled = statuses.filter((check) => check?.status === 'cancelled').length;
-  const total = statuses.length;
+  const total = scopedRun ? runTotal : statuses.length;
   const progressUnits = statuses.reduce((sum, check) => {
     if (['healthy', 'warning', 'critical'].includes(check?.status)) return sum + 100;
     if (check?.status === 'cancelled') return sum + 100;

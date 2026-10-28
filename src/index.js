@@ -147,7 +147,8 @@ app.get('/api/dashboard', async (req, res, next) => {
 				progressStage: check.progressStage || 'Queued',
 				mobileProgressPercent: check.mobileProgressPercent || 0
 			})),
-			progressRun?.status
+			progressRun?.status,
+			progressRun?.total
 		);
 		runProgress.runId = progressRun ? String(progressRun._id) : null;
 		const checksByWebsite = new Map(runChecks.map((check) => [String(check.website), { status: check.status, startedAt: check.startedAt, progressPercent: check.progressPercent || 0, progressStage: check.progressStage || 'Queued', mobileProgressPercent: check.mobileProgressPercent || 0 }]));
@@ -200,7 +201,7 @@ app.get('/api/runs', async (_req, res, next) => { try { res.json(await Run.find(
 app.get('/api/runs/:id/progress', async (req, res, next) => {
 	try {
 		const [run, progressWebsites] = await Promise.all([
-			Run.findById(req.params.id).select('status').lean(),
+			Run.findById(req.params.id).select('status total').lean(),
 			Website.find().select('lastCheck').populate('lastCheck', 'status progressPercent mobileProgressPercent').lean()
 		]);
 		if (!run) return res.status(404).json({ error: 'Run not found.' });
@@ -214,7 +215,8 @@ app.get('/api/runs/:id/progress', async (req, res, next) => {
 				progressStage: check.progressStage || 'Queued',
 				mobileProgressPercent: check.mobileProgressPercent || 0
 			})),
-			run.status
+			run.status,
+			run.total
 		);
 		res.json({
 			...progress,
