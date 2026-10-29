@@ -47,7 +47,8 @@ export function summarizeWebsiteProgress(websiteChecks, runChecks, runStatus, ru
   const completed = statuses.filter((check) => ['healthy', 'warning', 'critical'].includes(check?.status)).length;
   const processing = statuses.filter((check) => check?.status === 'processing').length;
   const cancelled = statuses.filter((check) => check?.status === 'cancelled').length;
-  const total = scopedRun ? runTotal : statuses.length;
+  // Checks are deleted together with their website, so the run's stored total can be stale; the surviving checks are the true scope.
+  const total = scopedRun ? runChecks.length : statuses.length;
   const progressUnits = statuses.reduce((sum, check) => {
     if (['healthy', 'warning', 'critical'].includes(check?.status)) return sum + 100;
     if (check?.status === 'cancelled') return sum + 100;
