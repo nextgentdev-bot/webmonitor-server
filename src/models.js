@@ -4,6 +4,8 @@ const websiteSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   url: { type: String, required: true, unique: true, trim: true },
   active: { type: Boolean, default: true },
+  pauseReason: { type: String, trim: true, default: '' },
+  pausedAt: { type: Date, default: null },
   sortOrder: { type: Number, index: true },
   lastCheck: { type: mongoose.Schema.Types.ObjectId, ref: 'Check', default: null }
 }, { timestamps: true });
