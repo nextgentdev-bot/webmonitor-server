@@ -63,12 +63,11 @@ async function deleteWebsiteChecks(filter) {
 	await Check.deleteMany(filter);
 	await Promise.all(runIds.map((runId) => maybeFinalizeRun(runId)));
 }
-async function pauseWebsites(ids) {
-	await Website.updateMany({ _id: { $in: ids } }, { $set: { active: false, lastCheck: null } });
-	const checkFilter = { website: { $in: ids }, status: { $in: ['pending', 'processing'] } };
-	const runIds = await Check.distinct('run', checkFilter);
-	await Check.updateMany(checkFilter, { $set: { status: 'cancelled', progressStage: 'Paused', finishedAt: new Date(), lockedAt: null, lockedBy: null } });
-	await Promise.all(runIds.map((runId) => maybeFinalizeRun(runId)));
+async function pauseWebsites(ids, reason) {
+	// Keep lastCheck so the previous result is still there after the website is resumed.
+	await Website.updateMany({ _id: { $in: ids } }, { $set: { active: false, pauseReason: String(reason || '').slice(0, 300), pausedAt: new Date() } });
+	// Waiting/running checks are removed (not "cancelled") so a resumed website does not show a false "Cancelled" status.
+	await deleteWebsiteChecks({ website: { $in: ids }, status: { $in: ['pending', 'processing'] } });
 }
 async function ensureWebsiteOrder() {
 	const unnumbered = await Website.find({ sortOrder: { $exists: false } }).sort({ createdAt: -1, _id: -1 }).select('_id').lean();
@@ -139,7 +138,7 @@ app.get('/api/dashboard', async (req, res, next) => {
 		const progressRun = activeRun || latestRun;
 		const runChecks = progressRun ? await Check.find({ run: progressRun._id }).select('website status startedAt progressPercent progressStage mobileProgressPercent').lean() : [];
 		const runProgress = summarizeWebsiteProgress(
-			progressWebsites.map((website) => ({ websiteId: String(website._id), lastCheck: website.lastCheck })),
+			progressWebsites.filter((website) => website.active).map((website) => ({ websiteId: String(website._id), lastCheck: website.lastCheck })),
 			runChecks.map((check) => ({
 				websiteId: String(check.website),
 				status: check.status,
@@ -164,9 +163,27 @@ app.get('/api/worker/status', async (_req, res, next) => {
 });
 app.post('/api/websites', async (req, res, next) => { try { if (await Website.countDocuments() >= config.maxWebsites) return res.status(400).json({ error: `Maximum ${config.maxWebsites} websites are allowed.` }); const url = normalizeUrl(req.body.url); const sortOrder = await nextWebsiteOrder(); const website = await Website.create({ name: String(req.body.name || '').trim() || nameFromUrl(url), url, sortOrder, active: req.body.active !== false }); res.status(201).json(website); } catch (error) { next(error); } });
 app.delete('/api/websites', async (_req, res, next) => { try { await deleteWebsiteChecks({}); const result = await Website.deleteMany({}); res.json({ deleted: result.deletedCount }); } catch (error) { next(error); } });
-app.patch('/api/websites/:id', async (req, res, next) => { try { const update = {}; if (req.body.url) update.url = normalizeUrl(req.body.url); if (req.body.name !== undefined) update.name = String(req.body.name).trim(); if (req.body.active === false) { const pauseReason = String(req.body.pauseReason || '').trim(); if (!pauseReason) return res.status(400).json({ error: 'A pause reason is required.' }); await pauseWebsites([req.params.id]); update.active = false; update.pauseReason = pauseReason.slice(0, 300); update.pausedAt = new Date(); } else if (req.body.active !== undefined) { update.active = Boolean(req.body.active); if (update.active) { update.pauseReason = ''; update.pausedAt = null; } } const website = Object.keys(update).length ? await Website.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true }) : await Website.findById(req.params.id); if (!website) return res.status(404).json({ error: 'Website not found.' }); res.json(website); } catch (error) { next(error); } });
+app.patch('/api/websites/:id', async (req, res, next) => {
+	try {
+		const update = {};
+		if (req.body.url) update.url = normalizeUrl(req.body.url);
+		if (req.body.name !== undefined) update.name = String(req.body.name).trim();
+		if (req.body.active === false) {
+			const pauseReason = String(req.body.pauseReason || '').trim();
+			if (!pauseReason) return res.status(400).json({ error: 'A pause reason is required.' });
+			if (!await Website.exists({ _id: req.params.id })) return res.status(404).json({ error: 'Website not found.' });
+			await pauseWebsites([req.params.id], pauseReason);
+		} else if (req.body.active !== undefined) {
+			update.active = Boolean(req.body.active);
+			if (update.active) { update.pauseReason = ''; update.pausedAt = null; }
+		}
+		const website = Object.keys(update).length ? await Website.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true }) : await Website.findById(req.params.id);
+		if (!website) return res.status(404).json({ error: 'Website not found.' });
+		res.json(website);
+	} catch (error) { next(error); }
+});
 app.delete('/api/websites/:id', async (req, res, next) => { try { await Website.findByIdAndDelete(req.params.id); await deleteWebsiteChecks({ website: req.params.id }); res.json({ ok: true }); } catch (error) { next(error); } });
-app.post('/api/websites/bulk-action', async (req, res, next) => { try { const ids = req.body.ids || []; const action = req.body.action; if (action === 'pause') await pauseWebsites(ids); else if (action === 'activate') await Website.updateMany({ _id: { $in: ids } }, { $set: { active: true, pauseReason: '', pausedAt: null } }); else if (action === 'delete') { await deleteWebsiteChecks({ website: { $in: ids } }); const result = await Website.deleteMany({ _id: { $in: ids } }); return res.json({ deleted: result.deletedCount }); } else if (action === 'check') return res.json(await enqueueRun({ type: 'manual', websiteIds: ids })); else return res.status(400).json({ error: 'Unknown action.' }); res.json({ ok: true }); } catch (error) { next(error); } });
+app.post('/api/websites/bulk-action', async (req, res, next) => { try { const ids = req.body.ids || []; const action = req.body.action; if (action === 'pause') { const reason = String(req.body.pauseReason || '').trim(); if (!reason) return res.status(400).json({ error: 'A pause reason is required.' }); await pauseWebsites(ids, reason); } else if (action === 'activate') await Website.updateMany({ _id: { $in: ids } }, { $set: { active: true, pauseReason: '', pausedAt: null } }); else if (action === 'delete') { await deleteWebsiteChecks({ website: { $in: ids } }); const result = await Website.deleteMany({ _id: { $in: ids } }); return res.json({ deleted: result.deletedCount }); } else if (action === 'check') return res.json(await enqueueRun({ type: 'manual', websiteIds: ids })); else return res.status(400).json({ error: 'Unknown action.' }); res.json({ ok: true }); } catch (error) { next(error); } });
 app.post('/api/import/preview', upload.single('file'), async (req, res, next) => { try { let rows = parseBulkText(req.body.urls || ''); if (req.file) { const workbook = XLSX.read(req.file.buffer, { type: 'buffer' }); const data = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: '' }); rows = rows.concat(data.map((row) => ({ name: row['Website Name'] || row.name || '', url: row['Website URL'] || row.url || Object.values(row)[0] }))); } const existing = new Set((await Website.find().select('url -_id').lean()).map((row) => row.url)); const seen = new Set(); const preview = rows.map((row, index) => { try { const url = normalizeUrl(row.url); const valid = !existing.has(url) && !seen.has(url); seen.add(url); return { rowNumber: index + 1, name: row.name || nameFromUrl(url), url, valid, reason: valid ? '' : existing.has(url) ? 'Already added' : 'Duplicate in import' }; } catch (error) { return { rowNumber: index + 1, name: row.name, url: row.url, valid: false, reason: error.message }; } }); res.json({ rows: preview, validCount: preview.filter((row) => row.valid).length }); } catch (error) { next(error); } });
 app.post('/api/import/google-sheet/preview', async (req, res, next) => { try { const { rows, gid, tab } = await rowsFromGoogleSheet(req.body.url); const existing = new Set((await Website.find().select('url -_id').lean()).map((row) => row.url)); const seen = new Set(); const preview = rows.map((row, index) => { try { const url = normalizeUrl(row.url); const valid = !seen.has(url); seen.add(url); return { rowNumber: index + 2, name: row.name || nameFromUrl(url), url, valid, action: existing.has(url) ? 'update' : 'add', reason: valid ? '' : 'Duplicate in sheet' }; } catch (error) { return { rowNumber: index + 2, name: row.name, url: row.url, valid: false, action: 'invalid', reason: error.message }; } }); res.json({ rows: preview, validCount: preview.filter((row) => row.valid).length, sourceCount: rows.length, gid, tab }); } catch (error) { next(error); } });
 app.post('/api/import/google-sheet/commit', async (req, res, next) => {
@@ -202,12 +219,12 @@ app.get('/api/runs/:id/progress', async (req, res, next) => {
 	try {
 		const [run, progressWebsites] = await Promise.all([
 			Run.findById(req.params.id).select('status total').lean(),
-			Website.find().select('lastCheck').populate('lastCheck', 'status progressPercent mobileProgressPercent').lean()
+			Website.find().select('active lastCheck').populate('lastCheck', 'status progressPercent mobileProgressPercent').lean()
 		]);
 		if (!run) return res.status(404).json({ error: 'Run not found.' });
 		const checks = await Check.find({ run: req.params.id }).select('website status progressPercent progressStage mobileProgressPercent').lean();
 		const progress = summarizeWebsiteProgress(
-			progressWebsites.map((website) => ({ websiteId: String(website._id), lastCheck: website.lastCheck })),
+			progressWebsites.filter((website) => website.active).map((website) => ({ websiteId: String(website._id), lastCheck: website.lastCheck })),
 			checks.map((check) => ({
 				websiteId: String(check.website),
 				status: check.status,

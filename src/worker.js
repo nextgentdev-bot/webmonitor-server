@@ -38,7 +38,13 @@ async function loop(browser, slot) {
 				runId: claimed.check.run,
 				onProgress: (progress) => updateCheckProgress(claimed.check._id, progress).catch((error) => console.error('Unable to save check progress:', error.message))
 			});
-			await completeCheck(claimed.check, result);
+			const saved = await completeCheck(claimed.check, result);
+			if (!saved) {
+				// The check was cancelled, paused or deleted while it was running, so its result is discarded.
+				console.log(`Worker ${slot} discarded the result for ${claimed.website.url} because the check was stopped.`);
+				await maybeFinalizeRun(claimed.check.run);
+				continue;
+			}
 			try {
 				if (await syncWebsiteStatusToSheet(claimed.website, result)) {
 					console.log(`Worker ${slot} synced Google Sheet status for ${claimed.website.url}.`);
