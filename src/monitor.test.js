@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult } from './monitor.js';
-import { countHealthyWebsites, defaultGoogleSheetTab, parseGoogleSheetRows, summarizeWebsiteProgress } from './utils.js';
+import { countHealthyWebsites, defaultGoogleSheetTab, latestCheckPerWebsite, parseGoogleSheetRows, summarizeWebsiteProgress } from './utils.js';
 
 test('normalizes mixed Bengali and English navigation labels', () => {
   assert.equal(normalizeMenuLabel('  Contact—Us  '), 'contact us');
@@ -181,4 +181,17 @@ test('counts paused websites as resolved without exposing them as active work', 
     cancelled: 1,
     percent: 100
   });
+});
+
+test('counts a re-checked website once and prefers its open check', () => {
+  const checks = [
+    { _id: '1', website: 'a', status: 'healthy' },
+    { _id: '2', website: 'b', status: 'healthy' },
+    { _id: '3', website: 'a', status: 'pending' },
+    { _id: '4', website: 'b', status: 'warning' }
+  ];
+  const result = latestCheckPerWebsite(checks);
+  assert.equal(result.length, 2);
+  assert.equal(result.find((check) => check.website === 'a').status, 'pending');
+  assert.equal(result.find((check) => check.website === 'b')._id, '4');
 });

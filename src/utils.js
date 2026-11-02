@@ -38,6 +38,21 @@ export function defaultGoogleSheetTab(sheetNames) {
 export function countHealthyWebsites(websiteChecks) {
   return websiteChecks.filter(({ active, lastCheck }) => active && lastCheck?.status === 'healthy').length;
 }
+// A run can hold more than one check for the same website (for example a manual re-check of a site that already finished).
+// The open (pending/processing) check wins, otherwise the newest one, so progress and status are counted once per website.
+export function latestCheckPerWebsite(checks) {
+  const isOpen = (check) => ['pending', 'processing'].includes(check.status);
+  const latest = new Map();
+  for (const check of checks) {
+    const key = String(check.website ?? check.websiteId);
+    const current = latest.get(key);
+    const better = !current
+      || (isOpen(check) && !isOpen(current))
+      || (isOpen(check) === isOpen(current) && String(check._id ?? '') > String(current._id ?? ''));
+    if (better) latest.set(key, check);
+  }
+  return [...latest.values()];
+}
 export function summarizeWebsiteProgress(websiteChecks, runChecks, runStatus, runTotal = null) {
   const checksByWebsite = new Map(runChecks.map((check) => [check.websiteId, check]));
   const scopedRun = Number.isFinite(runTotal) && runTotal > 0 && runChecks.length > 0;

@@ -2,7 +2,39 @@ import os from 'node:os';
 import { Check, Run, Website } from './models.js';
 import { config } from './config.js';
 
-export async function enqueueRun({ type = 'manual', websiteIds = null, localRunDate = null } = {}) { const filter = { active: true, ...(websiteIds?.length ? { _id: { $in: websiteIds } } : {}) }; const websites = await Website.find(filter).limit(config.maxWebsites).lean(); if (!websites.length) return { created: false, reason: websiteIds?.length ? 'No selected websites are available to check.' : 'No active websites are available.' }; if (type === 'daily' && await Run.exists({ status: 'running', type: 'daily' })) return { created: false, reason: 'A daily monitoring run is already in progress.' }; const run = await Run.create({ type, total: websites.length, localRunDate }); await Check.insertMany(websites.map((website) => ({ run: run._id, website: website._id }))); return { created: true, runId: run._id.toString(), total: websites.length }; }
+export async function enqueueRun({ type = 'manual', websiteIds = null, localRunDate = null } = {}) {
+	const filter = { active: true, ...(websiteIds?.length ? { _id: { $in: websiteIds } } : {}) };
+	const websites = await Website.find(filter).limit(config.maxWebsites).lean();
+	if (!websites.length) return { created: false, reason: websiteIds?.length ? 'No selected websites are available to check.' : 'No active websites are available.' };
+	if (type === 'daily' && await Run.exists({ status: 'running', type: 'daily' })) return { created: false, reason: 'A daily monitoring run is already in progress.' };
+
+	// A website must never have two open checks at once: two browsers would load the same site and the older result could overwrite the newer one.
+	const runningRuns = await Run.find({ status: 'running' }).select('_id').sort({ startedAt: -1 }).lean();
+	const openChecks = runningRuns.length
+		? await Check.find({ run: { $in: runningRuns.map((run) => run._id) }, status: { $in: ['pending', 'processing'] }, website: { $in: websites.map((website) => website._id) } }).select('website').lean()
+		: [];
+	const openWebsiteIds = new Set(openChecks.map((check) => String(check.website)));
+	const queueable = websites.filter((website) => !openWebsiteIds.has(String(website._id)));
+	const skipped = websites.length - queueable.length;
+	if (!queueable.length) return { created: false, skipped, reason: websites.length === 1 ? 'This website is already queued or being checked.' : 'All selected websites are already queued or being checked.' };
+
+	// A manual check made while a run is in progress joins that run, so there is one run, one progress bar and one Cancel button.
+	if (type === 'manual' && runningRuns.length) {
+		const runId = runningRuns[0]._id;
+		const checks = await Check.insertMany(queueable.map((website) => ({ run: runId, website: website._id })));
+		const run = await Run.findOneAndUpdate(
+			{ _id: runId, status: { $in: ['running', 'completed'] } },
+			{ $set: { status: 'running' }, $unset: { finishedAt: 1 }, $inc: { total: checks.length } }
+		);
+		if (run) return { created: true, joined: true, skipped, runId: runId.toString(), total: checks.length };
+		// The run was cancelled while the checks were being added, so they are removed and a new run is created below.
+		await Check.deleteMany({ _id: { $in: checks.map((check) => check._id) } });
+	}
+
+	const run = await Run.create({ type, total: queueable.length, localRunDate });
+	await Check.insertMany(queueable.map((website) => ({ run: run._id, website: website._id })));
+	return { created: true, skipped, runId: run._id.toString(), total: queueable.length };
+}
 export async function claimNextCheck(workerId = `${os.hostname()}-${process.pid}`) { const runningRuns = await Run.find({ status: 'running' }).select('_id').lean(); if (!runningRuns.length) return null; const check = await Check.findOneAndUpdate({ run: { $in: runningRuns.map((run) => run._id) }, status: 'pending', scheduledAt: { $lte: new Date() } }, { $set: { status: 'processing', lockedAt: new Date(), lockedBy: workerId, startedAt: new Date(), progressPercent: 0, progressStage: 'Starting' }, $inc: { attempts: 1 } }, { sort: { scheduledAt: 1, createdAt: 1 }, new: true }).populate('website');
 	if (!check) return null;
 	// A website can be paused or deleted right after its check was queued; never run a check for it.
