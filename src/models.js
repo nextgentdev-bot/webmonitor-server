@@ -19,6 +19,8 @@ const checkSchema = new mongoose.Schema({
   mobileProgressPercent: { type: Number, default: 0 },
   progressStage: { type: String, default: 'Queued' },
   scheduledAt: { type: Date, default: Date.now },
+  // 0 = normal queue. A larger number is claimed first; the newest priority batch has the largest number.
+  priority: { type: Number, default: 0 },
   lockedAt: Date,
   lockedBy: String,
   startedAt: Date,

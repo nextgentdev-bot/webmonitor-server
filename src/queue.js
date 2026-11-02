@@ -8,34 +8,56 @@ export async function enqueueRun({ type = 'manual', websiteIds = null, localRunD
 	if (!websites.length) return { created: false, reason: websiteIds?.length ? 'No selected websites are available to check.' : 'No active websites are available.' };
 	if (type === 'daily' && await Run.exists({ status: 'running', type: 'daily' })) return { created: false, reason: 'A daily monitoring run is already in progress.' };
 
-	// A website must never have two open checks at once: two browsers would load the same site and the older result could overwrite the newer one.
 	const runningRuns = await Run.find({ status: 'running' }).select('_id').sort({ startedAt: -1 }).lean();
-	const openChecks = runningRuns.length
-		? await Check.find({ run: { $in: runningRuns.map((run) => run._id) }, status: { $in: ['pending', 'processing'] }, website: { $in: websites.map((website) => website._id) } }).select('website').lean()
+	const runIds = runningRuns.map((run) => run._id);
+	// Websites picked by hand (marked, or a single "Run check now") while a run is in progress go ahead of the rest of that run.
+	const prioritize = type === 'manual' && Boolean(websiteIds?.length) && runIds.length > 0;
+
+	// A website must never have two open checks at once: two browsers would load the same site and the older result could overwrite the newer one.
+	const openChecks = runIds.length
+		? await Check.find({ run: { $in: runIds }, status: { $in: ['pending', 'processing'] }, website: { $in: websites.map((website) => website._id) } }).select('website status run').lean()
 		: [];
-	const openWebsiteIds = new Set(openChecks.map((check) => String(check.website)));
-	const queueable = websites.filter((website) => !openWebsiteIds.has(String(website._id)));
-	const skipped = websites.length - queueable.length;
-	if (!queueable.length) return { created: false, skipped, reason: websites.length === 1 ? 'This website is already queued or being checked.' : 'All selected websites are already queued or being checked.' };
+	const openByWebsite = new Map(openChecks.map((check) => [String(check.website), check]));
+	const queueable = [];
+	const bumpable = [];
+	let skipped = 0;
+	for (const website of websites) {
+		const open = openByWebsite.get(String(website._id));
+		if (!open) queueable.push(website);
+		else if (prioritize && open.status === 'pending') bumpable.push(open); // still waiting in the queue: move it to the front
+		else skipped += 1; // already being checked right now (or queued in a normal run)
+	}
+	if (!queueable.length && !bumpable.length) return { created: false, skipped, reason: websites.length === 1 ? 'This website is already being checked.' : 'All selected websites are already being checked.' };
+
+	// Newest priority batch gets the largest number, so a later batch always runs before an earlier one.
+	let priority = 0;
+	if (prioritize) {
+		const top = await Check.findOne({ run: { $in: runIds }, status: 'pending' }).sort({ priority: -1 }).select('priority').lean();
+		priority = Math.max(Date.now(), (top?.priority || 0) + 1);
+	}
+	if (bumpable.length) await Check.updateMany({ _id: { $in: bumpable.map((check) => check._id) }, status: 'pending' }, { $set: { priority, progressStage: 'Priority queued' } });
+	if (!queueable.length) return { created: true, joined: true, prioritized: true, skipped, bumped: bumpable.length, queued: 0, runId: String(bumpable[0].run), total: bumpable.length };
 
 	// A manual check made while a run is in progress joins that run, so there is one run, one progress bar and one Cancel button.
-	if (type === 'manual' && runningRuns.length) {
-		const runId = runningRuns[0]._id;
-		const checks = await Check.insertMany(queueable.map((website) => ({ run: runId, website: website._id })));
+	if (type === 'manual' && runIds.length) {
+		const runId = runIds[0];
+		const checks = await Check.insertMany(queueable.map((website) => ({ run: runId, website: website._id, priority, progressStage: prioritize ? 'Priority queued' : 'Queued' })));
 		const run = await Run.findOneAndUpdate(
 			{ _id: runId, status: { $in: ['running', 'completed'] } },
 			{ $set: { status: 'running' }, $unset: { finishedAt: 1 }, $inc: { total: checks.length } }
 		);
-		if (run) return { created: true, joined: true, skipped, runId: runId.toString(), total: checks.length };
+		if (run) return { created: true, joined: true, prioritized: prioritize, skipped, bumped: bumpable.length, queued: checks.length, runId: runId.toString(), total: checks.length + bumpable.length };
 		// The run was cancelled while the checks were being added, so they are removed and a new run is created below.
 		await Check.deleteMany({ _id: { $in: checks.map((check) => check._id) } });
+		const bumpedIds = new Set(bumpable.map((check) => String(check.website)));
+		queueable.push(...websites.filter((website) => bumpedIds.has(String(website._id))));
 	}
 
 	const run = await Run.create({ type, total: queueable.length, localRunDate });
 	await Check.insertMany(queueable.map((website) => ({ run: run._id, website: website._id })));
 	return { created: true, skipped, runId: run._id.toString(), total: queueable.length };
 }
-export async function claimNextCheck(workerId = `${os.hostname()}-${process.pid}`) { const runningRuns = await Run.find({ status: 'running' }).select('_id').lean(); if (!runningRuns.length) return null; const check = await Check.findOneAndUpdate({ run: { $in: runningRuns.map((run) => run._id) }, status: 'pending', scheduledAt: { $lte: new Date() } }, { $set: { status: 'processing', lockedAt: new Date(), lockedBy: workerId, startedAt: new Date(), progressPercent: 0, progressStage: 'Starting' }, $inc: { attempts: 1 } }, { sort: { scheduledAt: 1, createdAt: 1 }, new: true }).populate('website');
+export async function claimNextCheck(workerId = `${os.hostname()}-${process.pid}`) { const runningRuns = await Run.find({ status: 'running' }).select('_id').lean(); if (!runningRuns.length) return null; const check = await Check.findOneAndUpdate({ run: { $in: runningRuns.map((run) => run._id) }, status: 'pending', scheduledAt: { $lte: new Date() } }, { $set: { status: 'processing', lockedAt: new Date(), lockedBy: workerId, startedAt: new Date(), progressPercent: 0, progressStage: 'Starting' }, $inc: { attempts: 1 } }, { sort: { priority: -1, scheduledAt: 1, createdAt: 1 }, new: true }).populate('website');
 	if (!check) return null;
 	// A website can be paused or deleted right after its check was queued; never run a check for it.
 	if (!check.website?.active) {

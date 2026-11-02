@@ -53,6 +53,9 @@ export function latestCheckPerWebsite(checks) {
   }
   return [...latest.values()];
 }
+export function countOpenPriorityChecks(checks) {
+  return checks.filter((check) => (check.priority || 0) > 0 && ['pending', 'processing'].includes(check.status)).length;
+}
 export function summarizeWebsiteProgress(websiteChecks, runChecks, runStatus, runTotal = null) {
   const checksByWebsite = new Map(runChecks.map((check) => [check.websiteId, check]));
   const scopedRun = Number.isFinite(runTotal) && runTotal > 0 && runChecks.length > 0;

@@ -9,7 +9,7 @@ import { connectDatabase } from './db.js';
 import { config } from './config.js';
 import { Check, Run, Setting, Website } from './models.js';
 import { cancelRun, enqueueRun, maybeFinalizeRun, runDetails } from './queue.js';
-import { countHealthyWebsites, defaultGoogleSheetTab, latestCheckPerWebsite, nameFromUrl, normalizeUrl, parseBulkText, parseGoogleSheetRows, summarizeWebsiteProgress, toCsv } from './utils.js';
+import { countHealthyWebsites, defaultGoogleSheetTab, countOpenPriorityChecks, latestCheckPerWebsite, nameFromUrl, normalizeUrl, parseBulkText, parseGoogleSheetRows, summarizeWebsiteProgress, toCsv } from './utils.js';
 import { startScheduler } from './scheduler.js';
 import { createGoogleAuthorizationUrl, createResultsSheet, disableGoogleSheetSync, exchangeGoogleAuthorizationCode, googleSheetsStatus } from './google-sheets.js';
 
@@ -136,7 +136,7 @@ app.get('/api/dashboard', async (req, res, next) => {
 		const latestRunIsStale = Boolean(latestRun && newestActiveWebsite && newestActiveWebsite.createdAt > latestRun.startedAt);
 		const healthy = countHealthyWebsites(progressWebsites);
 		const progressRun = activeRun || latestRun;
-		const runChecks = progressRun ? latestCheckPerWebsite(await Check.find({ run: progressRun._id }).select('website status startedAt progressPercent progressStage mobileProgressPercent').lean()) : [];
+		const runChecks = progressRun ? latestCheckPerWebsite(await Check.find({ run: progressRun._id }).select('website status startedAt priority progressPercent progressStage mobileProgressPercent').lean()) : [];
 		const runProgress = summarizeWebsiteProgress(
 			progressWebsites.filter((website) => website.active).map((website) => ({ websiteId: String(website._id), lastCheck: website.lastCheck })),
 			runChecks.map((check) => ({
@@ -150,6 +150,7 @@ app.get('/api/dashboard', async (req, res, next) => {
 			progressRun?.total
 		);
 		runProgress.runId = progressRun ? String(progressRun._id) : null;
+		runProgress.priorityOpen = countOpenPriorityChecks(runChecks);
 		const checksByWebsite = new Map(runChecks.map((check) => [String(check.website), { status: check.status, startedAt: check.startedAt, progressPercent: check.progressPercent || 0, progressStage: check.progressStage || 'Queued', mobileProgressPercent: check.mobileProgressPercent || 0 }]));
 		const dashboardWebsites = websites.map((website) => ({
 			...website,
@@ -222,7 +223,7 @@ app.get('/api/runs/:id/progress', async (req, res, next) => {
 			Website.find().select('active lastCheck').populate('lastCheck', 'status progressPercent mobileProgressPercent').lean()
 		]);
 		if (!run) return res.status(404).json({ error: 'Run not found.' });
-		const checks = latestCheckPerWebsite(await Check.find({ run: req.params.id }).select('website status progressPercent progressStage mobileProgressPercent').lean());
+		const checks = latestCheckPerWebsite(await Check.find({ run: req.params.id }).select('website status priority progressPercent progressStage mobileProgressPercent').lean());
 		const progress = summarizeWebsiteProgress(
 			progressWebsites.filter((website) => website.active).map((website) => ({ websiteId: String(website._id), lastCheck: website.lastCheck })),
 			checks.map((check) => ({
@@ -238,6 +239,7 @@ app.get('/api/runs/:id/progress', async (req, res, next) => {
 		res.json({
 			...progress,
 			runId: String(req.params.id),
+			priorityOpen: countOpenPriorityChecks(checks),
 			checks: checks.map((check) => ({ websiteId: String(check.website), status: check.status, progressPercent: check.progressPercent || 0, progressStage: check.progressStage || 'Queued', mobileProgressPercent: check.mobileProgressPercent || 0 }))
 		});
 	} catch (error) { next(error); }
