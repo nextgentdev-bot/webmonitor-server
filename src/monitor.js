@@ -1,4 +1,5 @@
 import { config } from './config.js';
+import { pausedKeySet } from './check-options.js';
 
 const navigationSelectors = [
   'nav a[href]',
@@ -261,9 +262,10 @@ export function getHomepageCandidates(url) {
   }
 }
 
-export function getOverallStatus(homepage, issues) {
+export function getOverallStatus(homepage, issues, { homepagePaused = false } = {}) {
   const unreachable = !homepage.statusCode && !homepage.timedOut;
-  return unreachable || homepage.statusCode >= 500 || homepage.sslValid === false
+  // A paused homepage check can never make the website critical.
+  return !homepagePaused && (unreachable || homepage.statusCode >= 500 || homepage.sslValid === false)
     ? 'critical'
     : issues.length
       ? 'warning'
@@ -277,6 +279,9 @@ export function resolveNewsCheckResult(result, mainNewsPageExists) {
 }
 
 export async function monitorWebsite(browser, { website, runId, onProgress = async () => {}, signal }) {
+  // Checks the user paused for this website (homepage, loadTime, news, contact). They are skipped and never create issues.
+  const paused = pausedKeySet(website);
+  const pausedResult = () => ({ status: 'paused' });
   let completedSteps = 0;
   const reportStep = async (stage, count = 1, progress = {}) => {
     completedSteps += count;
@@ -316,25 +321,33 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
         homepage.sslValid = !/ssl|certificate|cert_/i.test(error.message);
       }
     }
-    if ((!homepage.statusCode && !homepage.timedOut) || homepage.statusCode >= 400 || homepage.blank) {
+    if (((!homepage.statusCode && !homepage.timedOut) || homepage.statusCode >= 400 || homepage.blank) && !paused.has('homepage')) {
       issues.push(lastHomepageError || 'Main website could not be opened successfully.');
     }
     if (homepage.timedOut && !issues.some((issue) => issue.startsWith('Main website could not be opened'))) {
-      issues.push(`Main website took longer than the ${config.navigationTimeoutMs} ms navigation timeout.`);
+      if (!paused.has('loadTime')) issues.push(`Main website took longer than the ${config.navigationTimeoutMs} ms navigation timeout.`);
+      // With the loading-time check paused, a page that never opened is still a homepage problem unless that is paused too.
+      else if (!paused.has('homepage')) issues.push(lastHomepageError || 'Main website could not be opened successfully.');
     }
-    if (homepage.loadTimeMs > config.slowPageMs) issues.push(`Main website is slow (${homepage.loadTimeMs} ms).`);
-    await reportStep('Homepage checked');
+    if (homepage.loadTimeMs > config.slowPageMs && !paused.has('loadTime')) issues.push(`Main website is slow (${homepage.loadTimeMs} ms).`);
+    await reportStep(paused.has('homepage') && paused.has('loadTime') ? 'Homepage paused' : 'Homepage checked');
 
-    const mainNewsPage = await checkMainNewsPage(desktopContext, homepage.finalUrl);
+    const mainNewsPage = paused.has('news') ? { exists: false } : await checkMainNewsPage(desktopContext, homepage.finalUrl);
     const stepFailure = (label, error) => ({ status: 'error', url: null, statusCode: null, error: `${label} could not be checked: ${String(error?.message || error).split('\n')[0].slice(0, 160)}` });
     const desktopChecks = (async () => {
       try {
-      const contactFound = await findContactLink(desktop);
-      const contact = await checkMenu(desktop, desktopContext, 'contact', { found: contactFound });
-      await reportStep('Desktop Contact checked');
-      const newsFound = await findNewsLink(desktop);
-      const news = await checkMenu(desktop, desktopContext, 'news', { found: newsFound });
-      await reportStep('Desktop News checked');
+      let contact = pausedResult();
+      if (!paused.has('contact')) {
+        const contactFound = await findContactLink(desktop);
+        contact = await checkMenu(desktop, desktopContext, 'contact', { found: contactFound });
+      }
+      await reportStep(paused.has('contact') ? 'Desktop Contact paused' : 'Desktop Contact checked');
+      let news = pausedResult();
+      if (!paused.has('news')) {
+        const newsFound = await findNewsLink(desktop);
+        news = await checkMenu(desktop, desktopContext, 'news', { found: newsFound });
+      }
+      await reportStep(paused.has('news') ? 'Desktop News paused' : 'Desktop News checked');
       return [contact, news];
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
@@ -342,13 +355,23 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
         return [failed, failed];
       }
     })();
-    const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
-    contexts.push(mobileContext);
-    if (signal?.aborted) closeContexts();
-    const mobile = await mobileContext.newPage();
-    mobile.setDefaultNavigationTimeout(config.navigationTimeoutMs);
+    // The mobile browser is only opened when at least one menu check (contact / news) is still active.
+    const needsMobile = !paused.has('contact') || !paused.has('news');
+    let mobileContext = null;
+    let mobile = null;
+    if (needsMobile) {
+      mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+      contexts.push(mobileContext);
+      if (signal?.aborted) closeContexts();
+      mobile = await mobileContext.newPage();
+      mobile.setDefaultNavigationTimeout(config.navigationTimeoutMs);
+    }
     const mobileChecks = (async () => {
       try {
+      if (!needsMobile) {
+        await reportStep('Mobile checks paused', 2, { mobileProgressPercent: 100 });
+        return { contact: pausedResult(), news: pausedResult() };
+      }
       if (!homepage.statusCode || homepage.statusCode >= 500) {
         await reportStep('Mobile checks skipped', 2, { mobileProgressPercent: 100 });
         return { contact: { status: 'skipped' }, news: { status: 'skipped' } };
@@ -373,12 +396,18 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
           menuOpenError = error.message;
         }
       }
-      const contactFound = await findContactLink(mobile, { includeHidden: true });
-      const contact = await checkMenu(mobile, mobileContext, 'contact', { includeHidden: true, found: contactFound });
-      await reportStep('Mobile Contact checked', 1, { mobileProgressPercent: 70 });
-      const newsFound = await findNewsLink(mobile, { includeHidden: true });
-      const news = await checkMenu(mobile, mobileContext, 'news', { includeHidden: true, found: newsFound });
-      await reportStep('Mobile News checked', 1, { mobileProgressPercent: 100 });
+      let contact = pausedResult();
+      if (!paused.has('contact')) {
+        const contactFound = await findContactLink(mobile, { includeHidden: true });
+        contact = await checkMenu(mobile, mobileContext, 'contact', { includeHidden: true, found: contactFound });
+      }
+      await reportStep(paused.has('contact') ? 'Mobile Contact paused' : 'Mobile Contact checked', 1, { mobileProgressPercent: 70 });
+      let news = pausedResult();
+      if (!paused.has('news')) {
+        const newsFound = await findNewsLink(mobile, { includeHidden: true });
+        news = await checkMenu(mobile, mobileContext, 'news', { includeHidden: true, found: newsFound });
+      }
+      await reportStep(paused.has('news') ? 'Mobile News paused' : 'Mobile News checked', 1, { mobileProgressPercent: 100 });
       const explainClosedMenu = (result) => menuOpenError && result.status === 'missing'
         ? { ...result, error: `Mobile menu could not be opened: ${menuOpenError}` }
         : result;
@@ -392,19 +421,23 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
 
     const [[desktopContact, desktopNews], mobileResult] = await Promise.all([desktopChecks, mobileChecks]);
     if (signal?.aborted) throw signal.reason || new Error('Run cancelled.');
-    const desktopNewsResult = resolveNewsCheckResult(desktopNews, mainNewsPage.exists);
-    const mobileNewsResult = resolveNewsCheckResult(mobileResult.news, mainNewsPage.exists);
-    const desktopResult = { contact: desktopContact, news: desktopNewsResult };
-    const finalMobileResult = { ...mobileResult, news: mobileNewsResult };
-    for (const [label, result] of [['Desktop Contact', desktopContact], ['Desktop News', desktopNewsResult], ['Mobile Contact', mobileResult.contact], ['Mobile News', mobileNewsResult]]) {
-      if (result.status !== 'working' && result.status !== 'skipped') {
+    // A paused check is always reported as "paused", whatever happened to the page while the other checks ran.
+    const withPause = (key, result) => paused.has(key) ? pausedResult() : result;
+    const desktopContactResult = withPause('contact', desktopContact);
+    const desktopNewsResult = withPause('news', resolveNewsCheckResult(desktopNews, mainNewsPage.exists));
+    const mobileContactResult = withPause('contact', mobileResult.contact);
+    const mobileNewsResult = withPause('news', resolveNewsCheckResult(mobileResult.news, mainNewsPage.exists));
+    const desktopResult = { contact: desktopContactResult, news: desktopNewsResult };
+    const finalMobileResult = { contact: mobileContactResult, news: mobileNewsResult };
+    for (const [label, result] of [['Desktop Contact', desktopContactResult], ['Desktop News', desktopNewsResult], ['Mobile Contact', mobileContactResult], ['Mobile News', mobileNewsResult]]) {
+      if (!['working', 'skipped', 'paused'].includes(result.status)) {
         const detail = result.error || (result.status === 'missing' ? 'Not added.' : 'Link has an error.');
         issues.push(`${label}: ${detail}`);
       }
     }
 
-    const status = getOverallStatus(homepage, issues);
-    return { overallStatus: status, homepage, desktop: desktopResult, mobile: finalMobileResult, issues, screenshots: [] };
+    const status = getOverallStatus(homepage, issues, { homepagePaused: paused.has('homepage') });
+    return { overallStatus: status, homepage, desktop: desktopResult, mobile: finalMobileResult, issues, screenshots: [], pausedChecks: [...paused] };
   } finally {
     signal?.removeEventListener('abort', closeContexts);
     await Promise.allSettled(contexts.map((context) => context.close()));

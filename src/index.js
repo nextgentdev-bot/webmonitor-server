@@ -8,7 +8,8 @@ import XLSX from 'xlsx';
 import { connectDatabase } from './db.js';
 import { config } from './config.js';
 import { Check, Run, Setting, Website } from './models.js';
-import { cancelRun, enqueueRun, maybeFinalizeRun, runDetails } from './queue.js';
+import { cancelRun, enqueueRun, maybeFinalizeRun, reconcileLastCheck, runDetails } from './queue.js';
+import { buildCheckPauseUpdate } from './check-options.js';
 import { countHealthyWebsites, defaultGoogleSheetTab, countOpenPriorityChecks, latestCheckPerWebsite, nameFromUrl, normalizeUrl, parseBulkText, parseGoogleSheetRows, summarizeWebsiteProgress, toCsv } from './utils.js';
 import { startScheduler } from './scheduler.js';
 import { createGoogleAuthorizationUrl, createResultsSheet, disableGoogleSheetSync, exchangeGoogleAuthorizationCode, googleSheetsStatus, pendingSheetRowCount, syncPendingSheetRows } from './google-sheets.js';
@@ -191,6 +192,19 @@ app.patch('/api/websites/:id', async (req, res, next) => {
 		const website = Object.keys(update).length ? await Website.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true }) : await Website.findById(req.params.id);
 		if (!website) return res.status(404).json({ error: 'Website not found.' });
 		res.json(website);
+	} catch (error) { next(error); }
+});
+// Pause or resume single checks (homepage, loadTime, news, contact) while the website itself keeps being monitored.
+// Body: { checks: { news: { paused: true, reason: 'Why' }, contact: { paused: false } } }
+app.patch('/api/websites/:id/checks', async (req, res, next) => {
+	try {
+		const website = await Website.findById(req.params.id).select('pausedChecks lastCheck').lean();
+		if (!website) return res.status(404).json({ error: 'Website not found.' });
+		const { update, error } = buildCheckPauseUpdate(website, req.body?.checks);
+		if (error) return res.status(400).json({ error });
+		await Website.updateOne({ _id: req.params.id }, { $set: update });
+		await reconcileLastCheck(req.params.id);
+		res.json(await Website.findById(req.params.id).populate('lastCheck').lean());
 	} catch (error) { next(error); }
 });
 app.delete('/api/websites/:id', async (req, res, next) => { try { await Website.findByIdAndDelete(req.params.id); await deleteWebsiteChecks({ website: req.params.id }); res.json({ ok: true }); } catch (error) { next(error); } });

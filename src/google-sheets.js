@@ -118,9 +118,12 @@ export function formatGoogleSheetStatus(result) {
   }
 
   const homepage = result.homepage || {};
-  if (homepage.sslValid === false) issues.unshift(`Homepage: ${compactError(homepage.error || 'SSL certificate')}`);
+  const pausedChecks = result.pausedChecks || result.rawResult?.pausedChecks || [];
+  // A paused homepage check is not reported at all; a paused loading-time check only hides the timeout warning.
+  if (pausedChecks.includes('homepage')) { /* paused: no homepage problems are written to the sheet */ }
+  else if (homepage.sslValid === false) issues.unshift(`Homepage: ${compactError(homepage.error || 'SSL certificate')}`);
   else if (homepage.blank) issues.unshift('Homepage: Blank response');
-  else if (homepage.timedOut) issues.unshift('Homepage: Request timed out');
+  else if (homepage.timedOut) { if (!pausedChecks.includes('loadTime')) issues.unshift('Homepage: Request timed out'); }
   else if (!homepage.statusCode) issues.unshift(`Homepage: ${compactError(homepage.error || 'Could not be reached')}`);
   else if (homepage.statusCode >= 400) issues.unshift(`Homepage: HTTP ${homepage.statusCode}`);
 

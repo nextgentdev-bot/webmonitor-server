@@ -1,6 +1,7 @@
 import os from 'node:os';
 import { Check, Run, Website } from './models.js';
 import { config } from './config.js';
+import { pausedKeySet, planLastCheckUpdate } from './check-options.js';
 
 export async function enqueueRun({ type = 'manual', websiteIds = null, localRunDate = null } = {}) {
 	const filter = { active: true, ...(websiteIds?.length ? { _id: { $in: websiteIds } } : {}) };
@@ -95,7 +96,30 @@ export async function updateCheckProgress(checkId, { percent, stage, mobileProgr
 	}
 	return Check.findOneAndUpdate({ _id: checkId, status: 'processing' }, update);
 }
-export async function completeCheck(check, result) { const updated = await Check.findOneAndUpdate({ _id: check._id, status: 'processing' }, { $set: { status: result.overallStatus, progressPercent: 100, progressStage: 'Complete', finishedAt: new Date(), homepage: result.homepage, desktop: result.desktop, mobile: result.mobile, issues: result.issues, screenshots: result.screenshots, rawResult: result, errorSummary: result.issues.join('\n'), lockedAt: null, lockedBy: null } }); if (updated) await Website.findByIdAndUpdate(check.website, { lastCheck: check._id }); return Boolean(updated); }
+export async function completeCheck(check, result) { const updated = await Check.findOneAndUpdate({ _id: check._id, status: 'processing' }, { $set: { status: result.overallStatus, progressPercent: 100, progressStage: 'Complete', finishedAt: new Date(), homepage: result.homepage, desktop: result.desktop, mobile: result.mobile, issues: result.issues, pausedChecks: result.pausedChecks || [], screenshots: result.screenshots, rawResult: result, errorSummary: result.issues.join('\n'), lockedAt: null, lockedBy: null } });
+	if (updated) {
+		await Website.findByIdAndUpdate(check.website, { lastCheck: check._id });
+		// The user may have paused or resumed a check while this one was running; make the saved result match the current settings.
+		await reconcileLastCheck(check.website).catch((error) => console.error('Unable to apply paused checks to the latest result:', error.message));
+	}
+	return Boolean(updated);
+}
+
+// Makes a website's latest saved result match its current paused checks:
+// paused checks show as "Paused" and stop counting as issues, resumed checks show as "Not checked" until the next run.
+// Returns true when the saved result was changed.
+export async function reconcileLastCheck(websiteId) {
+	const website = await Website.findById(websiteId).select('pausedChecks lastCheck').lean();
+	if (!website?.lastCheck) return false;
+	const check = await Check.findById(website.lastCheck).lean();
+	if (!check || !['healthy', 'warning', 'critical'].includes(check.status)) return false;
+	const plan = planLastCheckUpdate(check, pausedKeySet(website));
+	if (!plan) return false;
+	await Check.updateOne({ _id: check._id }, { $set: plan });
+	// The Google Sheet row is written again because the result changed.
+	await Website.updateOne({ _id: websiteId, lastCheck: check._id }, { $set: { sheetSyncedCheck: null } });
+	return true;
+}
 const shortReason = (error) => String(error?.message || error || 'Unknown error').split('\n')[0].replace(/\s+/g, ' ').slice(0, 220);
 
 // A check that could not finish still leaves a proper result behind, so the website shows what went wrong instead of "Not checked".
@@ -107,6 +131,7 @@ export function buildFailureResult(reason, { timedOut = false } = {}) {
 		desktop: skipped,
 		mobile: skipped,
 		issues: [`Check could not be completed: ${reason}`],
+		pausedChecks: [],
 		screenshots: [],
 		failure: reason
 	};

@@ -1,11 +1,16 @@
 import mongoose from 'mongoose';
 
+// One entry per pausable check (see check-options.js). paused=false means the check runs as normal.
+const pausedCheck = () => ({ paused: { type: Boolean, default: false }, reason: { type: String, trim: true, default: '' }, pausedAt: { type: Date, default: null } });
+
 const websiteSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   url: { type: String, required: true, unique: true, trim: true },
   active: { type: Boolean, default: true },
   pauseReason: { type: String, trim: true, default: '' },
   pausedAt: { type: Date, default: null },
+  // Pause only some checks (homepage, loading time, news, contact) while the website itself stays active.
+  pausedChecks: { homepage: pausedCheck(), loadTime: pausedCheck(), news: pausedCheck(), contact: pausedCheck() },
   sortOrder: { type: Number, index: true },
   lastCheck: { type: mongoose.Schema.Types.ObjectId, ref: 'Check', default: null },
   // The check whose result is already written to the Google Sheet. A website is waiting to be synced while this differs from lastCheck.
@@ -31,6 +36,8 @@ const checkSchema = new mongoose.Schema({
   desktop: { contact: Object, news: Object },
   mobile: { contact: Object, news: Object },
   issues: [String],
+  // Checks that were paused when this result was saved.
+  pausedChecks: [String],
   screenshots: [String],
   rawResult: mongoose.Schema.Types.Mixed,
   errorSummary: String
