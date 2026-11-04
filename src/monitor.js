@@ -283,112 +283,130 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     await onProgress({ percent: Math.floor(completedSteps / 5 * 100), stage, ...progress });
   };
   const issues = [];
-  const desktopContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-  const contexts = [desktopContext];
+  const contexts = [];
   const closeContexts = () => {
     for (const context of contexts) context.close().catch((error) => console.error('Unable to close cancelled browser context:', error.message));
   };
   signal?.addEventListener('abort', closeContexts, { once: true });
-  if (signal?.aborted) closeContexts();
-  const desktop = await desktopContext.newPage();
-  desktop.setDefaultNavigationTimeout(config.navigationTimeoutMs);
-  let homepage = { statusCode: null, loadTimeMs: null, sslValid: null, blank: false, timedOut: false, finalUrl: website.url, error: null };
+  // Browser contexts are always closed in `finally`, even when the check fails half way, so failed checks cannot pile up memory in the worker.
+  try {
+    const desktopContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    contexts.push(desktopContext);
+    if (signal?.aborted) closeContexts();
+    const desktop = await desktopContext.newPage();
+    desktop.setDefaultNavigationTimeout(config.navigationTimeoutMs);
+    let homepage = { statusCode: null, loadTimeMs: null, sslValid: null, blank: false, timedOut: false, finalUrl: website.url, error: null };
 
-  const homepageCandidates = getHomepageCandidates(website.url);
-  let lastHomepageError = null;
-  for (const candidate of homepageCandidates) {
-    try {
-      const started = Date.now();
-      const response = await desktop.goto(candidate, { waitUntil: 'domcontentloaded' });
-      const candidateStatus = response?.status() ?? null;
-      const loaded = { ...homepage, statusCode: candidateStatus, loadTimeMs: Date.now() - started, sslValid: true, blank: await desktop.locator('body').innerText().then((text) => text.trim().length < 20).catch(() => false), timedOut: false, finalUrl: desktop.url(), error: null };
-      homepage = loaded;
-      if (response && candidateStatus < 400 && !loaded.blank) break;
-      lastHomepageError = `Main website responded with HTTP ${candidateStatus ?? 'no response'}${loaded.blank ? ' and the page body is blank' : ''}.`;
-    } catch (error) {
-      if (signal?.aborted) throw signal.reason || error;
-      homepage.timedOut = error.name === 'TimeoutError' || /timeout/i.test(error.message);
-      lastHomepageError = `Main website could not be opened at ${candidate}: ${error.message}`;
-      homepage.error = error.message;
-      homepage.sslValid = !/ssl|certificate|cert_/i.test(error.message);
-    }
-  }
-  if ((!homepage.statusCode && !homepage.timedOut) || homepage.statusCode >= 400 || homepage.blank) {
-    issues.push(lastHomepageError || 'Main website could not be opened successfully.');
-  }
-  if (homepage.timedOut && !issues.some((issue) => issue.startsWith('Main website could not be opened'))) {
-    issues.push(`Main website took longer than the ${config.navigationTimeoutMs} ms navigation timeout.`);
-  }
-  if (homepage.loadTimeMs > config.slowPageMs) issues.push(`Main website is slow (${homepage.loadTimeMs} ms).`);
-  await reportStep('Homepage checked');
-
-  const mainNewsPage = await checkMainNewsPage(desktopContext, homepage.finalUrl);
-  const desktopChecks = (async () => {
-    const contactFound = await findContactLink(desktop);
-    const contact = await checkMenu(desktop, desktopContext, 'contact', { found: contactFound });
-    await reportStep('Desktop Contact checked');
-    const newsFound = await findNewsLink(desktop);
-    const news = await checkMenu(desktop, desktopContext, 'news', { found: newsFound });
-    await reportStep('Desktop News checked');
-    return [contact, news];
-  })();
-  const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
-  contexts.push(mobileContext);
-  if (signal?.aborted) closeContexts();
-  const mobile = await mobileContext.newPage();
-  mobile.setDefaultNavigationTimeout(config.navigationTimeoutMs);
-  const mobileChecks = (async () => {
-    if (!homepage.statusCode || homepage.statusCode >= 500) {
-      await reportStep('Mobile checks skipped', 2, { mobileProgressPercent: 100 });
-      return { contact: { status: 'skipped' }, news: { status: 'skipped' } };
-    }
-    await reportStep('Mobile homepage loading', 0, { mobileProgressPercent: 10 });
-    try {
-      await mobile.goto(website.url, { waitUntil: 'domcontentloaded' });
-    } catch (error) {
-      if (signal?.aborted) throw signal.reason || error;
-      await reportStep('Mobile checks failed to load', 2, { mobileProgressPercent: 100 });
-      const result = { status: 'error', url: mobile.url() || website.url, statusCode: null, error: `Mobile homepage could not be opened: ${error.message}` };
-      return { contact: result, news: result };
-    }
-    await reportStep('Mobile menu ready', 0, { mobileProgressPercent: 35 });
-    const menuButton = await findMobileMenuButton(mobile);
-    let menuOpenError = null;
-    if (menuButton && !await isMobileMenuOpen(mobile, menuButton)) {
+    const homepageCandidates = getHomepageCandidates(website.url);
+    let lastHomepageError = null;
+    for (const candidate of homepageCandidates) {
       try {
-        await menuButton.click({ timeout: 3000 });
-        await mobile.waitForTimeout(300);
+        const started = Date.now();
+        const response = await desktop.goto(candidate, { waitUntil: 'domcontentloaded' });
+        const candidateStatus = response?.status() ?? null;
+        const loaded = { ...homepage, statusCode: candidateStatus, loadTimeMs: Date.now() - started, sslValid: true, blank: await desktop.locator('body').innerText().then((text) => text.trim().length < 20).catch(() => false), timedOut: false, finalUrl: desktop.url(), error: null };
+        homepage = loaded;
+        if (response && candidateStatus < 400 && !loaded.blank) break;
+        lastHomepageError = `Main website responded with HTTP ${candidateStatus ?? 'no response'}${loaded.blank ? ' and the page body is blank' : ''}.`;
       } catch (error) {
-        menuOpenError = error.message;
+        if (signal?.aborted) throw signal.reason || error;
+        homepage.timedOut = error.name === 'TimeoutError' || /timeout/i.test(error.message);
+        lastHomepageError = `Main website could not be opened at ${candidate}: ${error.message}`;
+        homepage.error = error.message;
+        homepage.sslValid = !/ssl|certificate|cert_/i.test(error.message);
       }
     }
-    const contactFound = await findContactLink(mobile, { includeHidden: true });
-    const contact = await checkMenu(mobile, mobileContext, 'contact', { includeHidden: true, found: contactFound });
-    await reportStep('Mobile Contact checked', 1, { mobileProgressPercent: 70 });
-    const newsFound = await findNewsLink(mobile, { includeHidden: true });
-    const news = await checkMenu(mobile, mobileContext, 'news', { includeHidden: true, found: newsFound });
-    await reportStep('Mobile News checked', 1, { mobileProgressPercent: 100 });
-    const explainClosedMenu = (result) => menuOpenError && result.status === 'missing'
-      ? { ...result, error: `Mobile menu could not be opened: ${menuOpenError}` }
-      : result;
-    return { contact: explainClosedMenu(contact), news: explainClosedMenu(news) };
-  })();
-
-  const [[desktopContact, desktopNews], mobileResult] = await Promise.all([desktopChecks, mobileChecks]);
-  if (signal?.aborted) throw signal.reason || new Error('Run cancelled.');
-  const desktopNewsResult = resolveNewsCheckResult(desktopNews, mainNewsPage.exists);
-  const mobileNewsResult = resolveNewsCheckResult(mobileResult.news, mainNewsPage.exists);
-  const desktopResult = { contact: desktopContact, news: desktopNewsResult };
-  const finalMobileResult = { ...mobileResult, news: mobileNewsResult };
-  for (const [label, result] of [['Desktop Contact', desktopContact], ['Desktop News', desktopNewsResult], ['Mobile Contact', mobileResult.contact], ['Mobile News', mobileNewsResult]]) {
-    if (result.status !== 'working' && result.status !== 'skipped') {
-      const detail = result.error || (result.status === 'missing' ? 'Not added.' : 'Link has an error.');
-      issues.push(`${label}: ${detail}`);
+    if ((!homepage.statusCode && !homepage.timedOut) || homepage.statusCode >= 400 || homepage.blank) {
+      issues.push(lastHomepageError || 'Main website could not be opened successfully.');
     }
-  }
+    if (homepage.timedOut && !issues.some((issue) => issue.startsWith('Main website could not be opened'))) {
+      issues.push(`Main website took longer than the ${config.navigationTimeoutMs} ms navigation timeout.`);
+    }
+    if (homepage.loadTimeMs > config.slowPageMs) issues.push(`Main website is slow (${homepage.loadTimeMs} ms).`);
+    await reportStep('Homepage checked');
 
-  const status = getOverallStatus(homepage, issues);
-  signal?.removeEventListener('abort', closeContexts);
-  await Promise.all(contexts.map((context) => context.close()));
-  return { overallStatus: status, homepage, desktop: desktopResult, mobile: finalMobileResult, issues, screenshots: [] };
+    const mainNewsPage = await checkMainNewsPage(desktopContext, homepage.finalUrl);
+    const stepFailure = (label, error) => ({ status: 'error', url: null, statusCode: null, error: `${label} could not be checked: ${String(error?.message || error).split('\n')[0].slice(0, 160)}` });
+    const desktopChecks = (async () => {
+      try {
+      const contactFound = await findContactLink(desktop);
+      const contact = await checkMenu(desktop, desktopContext, 'contact', { found: contactFound });
+      await reportStep('Desktop Contact checked');
+      const newsFound = await findNewsLink(desktop);
+      const news = await checkMenu(desktop, desktopContext, 'news', { found: newsFound });
+      await reportStep('Desktop News checked');
+      return [contact, news];
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason || error;
+        const failed = stepFailure('Desktop menu', error);
+        return [failed, failed];
+      }
+    })();
+    const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    contexts.push(mobileContext);
+    if (signal?.aborted) closeContexts();
+    const mobile = await mobileContext.newPage();
+    mobile.setDefaultNavigationTimeout(config.navigationTimeoutMs);
+    const mobileChecks = (async () => {
+      try {
+      if (!homepage.statusCode || homepage.statusCode >= 500) {
+        await reportStep('Mobile checks skipped', 2, { mobileProgressPercent: 100 });
+        return { contact: { status: 'skipped' }, news: { status: 'skipped' } };
+      }
+      await reportStep('Mobile homepage loading', 0, { mobileProgressPercent: 10 });
+      try {
+        await mobile.goto(website.url, { waitUntil: 'domcontentloaded' });
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason || error;
+        await reportStep('Mobile checks failed to load', 2, { mobileProgressPercent: 100 });
+        const result = { status: 'error', url: mobile.url() || website.url, statusCode: null, error: `Mobile homepage could not be opened: ${error.message}` };
+        return { contact: result, news: result };
+      }
+      await reportStep('Mobile menu ready', 0, { mobileProgressPercent: 35 });
+      const menuButton = await findMobileMenuButton(mobile);
+      let menuOpenError = null;
+      if (menuButton && !await isMobileMenuOpen(mobile, menuButton)) {
+        try {
+          await menuButton.click({ timeout: 3000 });
+          await mobile.waitForTimeout(300);
+        } catch (error) {
+          menuOpenError = error.message;
+        }
+      }
+      const contactFound = await findContactLink(mobile, { includeHidden: true });
+      const contact = await checkMenu(mobile, mobileContext, 'contact', { includeHidden: true, found: contactFound });
+      await reportStep('Mobile Contact checked', 1, { mobileProgressPercent: 70 });
+      const newsFound = await findNewsLink(mobile, { includeHidden: true });
+      const news = await checkMenu(mobile, mobileContext, 'news', { includeHidden: true, found: newsFound });
+      await reportStep('Mobile News checked', 1, { mobileProgressPercent: 100 });
+      const explainClosedMenu = (result) => menuOpenError && result.status === 'missing'
+        ? { ...result, error: `Mobile menu could not be opened: ${menuOpenError}` }
+        : result;
+      return { contact: explainClosedMenu(contact), news: explainClosedMenu(news) };
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason || error;
+        const failed = stepFailure('Mobile menu', error);
+        return { contact: failed, news: failed };
+      }
+    })();
+
+    const [[desktopContact, desktopNews], mobileResult] = await Promise.all([desktopChecks, mobileChecks]);
+    if (signal?.aborted) throw signal.reason || new Error('Run cancelled.');
+    const desktopNewsResult = resolveNewsCheckResult(desktopNews, mainNewsPage.exists);
+    const mobileNewsResult = resolveNewsCheckResult(mobileResult.news, mainNewsPage.exists);
+    const desktopResult = { contact: desktopContact, news: desktopNewsResult };
+    const finalMobileResult = { ...mobileResult, news: mobileNewsResult };
+    for (const [label, result] of [['Desktop Contact', desktopContact], ['Desktop News', desktopNewsResult], ['Mobile Contact', mobileResult.contact], ['Mobile News', mobileNewsResult]]) {
+      if (result.status !== 'working' && result.status !== 'skipped') {
+        const detail = result.error || (result.status === 'missing' ? 'Not added.' : 'Link has an error.');
+        issues.push(`${label}: ${detail}`);
+      }
+    }
+
+    const status = getOverallStatus(homepage, issues);
+    return { overallStatus: status, homepage, desktop: desktopResult, mobile: finalMobileResult, issues, screenshots: [] };
+  } finally {
+    signal?.removeEventListener('abort', closeContexts);
+    await Promise.allSettled(contexts.map((context) => context.close()));
+  }
 }

@@ -7,7 +7,9 @@ const websiteSchema = new mongoose.Schema({
   pauseReason: { type: String, trim: true, default: '' },
   pausedAt: { type: Date, default: null },
   sortOrder: { type: Number, index: true },
-  lastCheck: { type: mongoose.Schema.Types.ObjectId, ref: 'Check', default: null }
+  lastCheck: { type: mongoose.Schema.Types.ObjectId, ref: 'Check', default: null },
+  // The check whose result is already written to the Google Sheet. A website is waiting to be synced while this differs from lastCheck.
+  sheetSyncedCheck: { type: mongoose.Schema.Types.ObjectId, ref: 'Check', default: null }
 }, { timestamps: true });
 
 const checkSchema = new mongoose.Schema({
@@ -38,6 +40,8 @@ checkSchema.index({ run: 1, status: 1 });
 
 const runSchema = new mongoose.Schema({
   type: { type: String, enum: ['manual', 'daily'], default: 'manual' },
+  // 'all' = every active website, 'selected' = marked websites or a single website.
+  scope: { type: String, enum: ['all', 'selected'], default: 'all' },
   status: { type: String, enum: ['running', 'completed', 'failed', 'cancelled'], default: 'running', index: true },
   total: { type: Number, default: 0 }, completed: { type: Number, default: 0 }, healthy: { type: Number, default: 0 }, warning: { type: Number, default: 0 }, critical: { type: Number, default: 0 },
   localRunDate: String, notificationSent: { type: Boolean, default: false }, startedAt: { type: Date, default: Date.now }, finishedAt: Date

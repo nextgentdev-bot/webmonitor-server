@@ -11,7 +11,7 @@ import { Check, Run, Setting, Website } from './models.js';
 import { cancelRun, enqueueRun, maybeFinalizeRun, runDetails } from './queue.js';
 import { countHealthyWebsites, defaultGoogleSheetTab, countOpenPriorityChecks, latestCheckPerWebsite, nameFromUrl, normalizeUrl, parseBulkText, parseGoogleSheetRows, summarizeWebsiteProgress, toCsv } from './utils.js';
 import { startScheduler } from './scheduler.js';
-import { createGoogleAuthorizationUrl, createResultsSheet, disableGoogleSheetSync, exchangeGoogleAuthorizationCode, googleSheetsStatus } from './google-sheets.js';
+import { createGoogleAuthorizationUrl, createResultsSheet, disableGoogleSheetSync, exchangeGoogleAuthorizationCode, googleSheetsStatus, pendingSheetRowCount, syncPendingSheetRows } from './google-sheets.js';
 
 const app = express(); const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 app.use(cors({ origin: config.clientOrigin })); app.use(express.json({ limit: '2mb' }));
@@ -108,7 +108,16 @@ app.post('/api/google-sheets/create', async (req, res, next) => {
 		await ensureWebsiteOrder();
 		const websites = await Website.find().sort({ sortOrder: 1, _id: 1 }).limit(config.maxWebsites).populate('lastCheck').lean();
 		if (!websites.length) return res.status(400).json({ error: 'Add at least one website before creating a results sheet.' });
-		res.status(201).json(await createResultsSheet(websites, req.body));
+		const created = await createResultsSheet(websites, req.body);
+		// The whole sheet was just written from the latest results, so nothing is waiting to be synced.
+		await Website.updateMany({ lastCheck: { $ne: null } }, [{ $set: { sheetSyncedCheck: '$lastCheck' } }]);
+		res.status(201).json(created);
+	} catch (error) { next(error); }
+});
+app.post('/api/google-sheets/sync-now', async (_req, res, next) => {
+	try {
+		const result = await syncPendingSheetRows({ force: true, maxBatches: 10 });
+		res.json({ ...result, pending: await pendingSheetRowCount() });
 	} catch (error) { next(error); }
 });
 app.delete('/api/google-sheets/sync', async (_req, res, next) => {
@@ -150,6 +159,7 @@ app.get('/api/dashboard', async (req, res, next) => {
 			progressRun?.total
 		);
 		runProgress.runId = progressRun ? String(progressRun._id) : null;
+		runProgress.scope = progressRun?.scope || 'all';
 		runProgress.priorityOpen = countOpenPriorityChecks(runChecks);
 		const checksByWebsite = new Map(runChecks.map((check) => [String(check.website), { status: check.status, startedAt: check.startedAt, progressPercent: check.progressPercent || 0, progressStage: check.progressStage || 'Queued', mobileProgressPercent: check.mobileProgressPercent || 0 }]));
 		const dashboardWebsites = websites.map((website) => ({
@@ -219,7 +229,7 @@ app.get('/api/runs', async (_req, res, next) => { try { res.json(await Run.find(
 app.get('/api/runs/:id/progress', async (req, res, next) => {
 	try {
 		const [run, progressWebsites] = await Promise.all([
-			Run.findById(req.params.id).select('status total').lean(),
+			Run.findById(req.params.id).select('status total scope').lean(),
 			Website.find().select('active lastCheck').populate('lastCheck', 'status progressPercent mobileProgressPercent').lean()
 		]);
 		if (!run) return res.status(404).json({ error: 'Run not found.' });
@@ -239,6 +249,7 @@ app.get('/api/runs/:id/progress', async (req, res, next) => {
 		res.json({
 			...progress,
 			runId: String(req.params.id),
+			scope: run.scope || 'all',
 			priorityOpen: countOpenPriorityChecks(checks),
 			checks: checks.map((check) => ({ websiteId: String(check.website), status: check.status, progressPercent: check.progressPercent || 0, progressStage: check.progressStage || 'Queued', mobileProgressPercent: check.mobileProgressPercent || 0 }))
 		});
@@ -257,7 +268,14 @@ app.get('/api/runs/:id', async (req, res, next) => { try { const details = await
 app.get('/api/runs/:id/export.csv', async (req, res, next) => { try { const details = await runDetails(req.params.id); if (!details) return res.status(404).end(); res.type('text/csv').attachment(`website-monitor-run-${req.params.id}.csv`).send(toCsv(details.checks.map((check) => ({ name: check.website.name, url: check.website.url, status: check.status, homepageStatusCode: check.homepage?.statusCode, loadTimeMs: check.homepage?.loadTimeMs, desktopContactStatus: check.desktop?.contact?.status, desktopNewsStatus: check.desktop?.news?.status, mobileContactStatus: check.mobile?.contact?.status, mobileNewsStatus: check.mobile?.news?.status, errorSummary: check.errorSummary })))); } catch (error) { next(error); } });
 app.get('/api/settings', async (_req, res, next) => { try { const values = Object.fromEntries((await Setting.find().lean()).map((setting) => [setting.key, setting.value])); res.json({ dailyTime: values.dailyTime || config.defaultDailyTime, timezone: values.timezone || config.defaultTimezone, instantAlerts: values.instantAlerts ?? String(config.instantAlertsDefault) }); } catch (error) { next(error); } });
 app.put('/api/settings', async (req, res, next) => { try { for (const [key, value] of Object.entries(req.body)) await Setting.findOneAndUpdate({ key }, { value: String(value) }, { upsert: true }); res.json(req.body); } catch (error) { next(error); } });
-app.use((error, _req, res, _next) => { console.error(error); res.status(error.code === 11000 ? 409 : 500).json({ error: error.code === 11000 ? 'This website already exists.' : error.message }); });
+app.use((error, _req, res, _next) => {
+	console.error(error);
+	const status = error.code === 11000 ? 409 : error.code === 'GOOGLE_AUTH_REVOKED' ? 400 : 500;
+	res.status(status).json({
+		error: error.code === 11000 ? 'This website already exists.' : error.message,
+		...(error.code ? { code: error.code } : {})
+	});
+});
 async function start() { await connectDatabase(); app.listen(config.port, () => { console.log(`API listening on http://localhost:${config.port}`); startScheduler(); }); }
 export default app;
 

@@ -18,6 +18,11 @@ export const config = {
   workerConcurrency: Math.max(1, number('WORKER_CONCURRENCY', 2)),
   checkTimeoutMs: number('CHECK_TIMEOUT_MS', 30000),
   navigationTimeoutMs: number('NAVIGATION_TIMEOUT_MS', 30000),
+  // Hard limit for one whole check (homepage + desktop + mobile). A check that goes over it is stopped and recorded as failed.
+  checkMaxDurationMs: Math.max(30000, number('CHECK_MAX_DURATION_MS', 180000)),
+  // A running check proves it is alive every few seconds. Only a check that has been silent this long is treated as abandoned.
+  lockHeartbeatMs: 10000,
+  lockStaleMs: Math.max(30000, number('LOCK_STALE_MS', 60000)),
   maxRetries: Math.max(1, number('MAX_RETRIES', 2)),
   retryDelaySeconds: Math.max(10, number('RETRY_DELAY_SECONDS', 120)),
   slowPageMs: number('SLOW_PAGE_MS', 7000),

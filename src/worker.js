@@ -3,9 +3,9 @@ import { chromium } from 'playwright';
 import { connectDatabase } from './db.js';
 import { config } from './config.js';
 import { Setting } from './models.js';
-import { claimNextCheck, completeCheck, failCheck, maybeFinalizeRun, recoverStaleChecks, updateCheckProgress } from './queue.js';
+import { claimNextCheck, completeCheck, failCheck, maybeFinalizeRun, recoverStaleChecks, touchCheck, updateCheckProgress } from './queue.js';
 import { monitorWebsite } from './monitor.js';
-import { syncWebsiteStatusToSheet } from './google-sheets.js';
+import { syncPendingSheetRows } from './google-sheets.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let stopping = false;
@@ -32,36 +32,37 @@ async function loop(browser, slot) {
 			continue;
 		}
 		console.log(`Worker ${slot} checking ${claimed.website.url}`);
+		// Every check has a time limit and keeps proving it is alive, so one stuck website can neither block this slot nor be mistaken for a dead worker.
+		const limit = new AbortController();
+		const timeLimit = setTimeout(() => limit.abort(new Error('Check time limit reached.')), config.checkMaxDurationMs);
+		const aliveSignal = setInterval(() => touchCheck(claimed.check._id).catch(() => {}), config.lockHeartbeatMs);
 		try {
 			const result = await monitorWebsite(browser, {
 				website: claimed.website,
 				runId: claimed.check.run,
+				signal: limit.signal,
 				onProgress: (progress) => updateCheckProgress(claimed.check._id, progress).catch((error) => console.error('Unable to save check progress:', error.message))
 			});
 			const saved = await completeCheck(claimed.check, result);
 			if (!saved) {
 				// The check was cancelled, paused or deleted while it was running, so its result is discarded.
 				console.log(`Worker ${slot} discarded the result for ${claimed.website.url} because the check was stopped.`);
-				await maybeFinalizeRun(claimed.check.run);
-				continue;
-			}
-			try {
-				if (await syncWebsiteStatusToSheet(claimed.website, result)) {
-					console.log(`Worker ${slot} synced Google Sheet status for ${claimed.website.url}.`);
-				}
-			} catch (error) {
-				console.error(`Worker ${slot} could not sync Google Sheet status for ${claimed.website.url}:`, error.message);
-			}
+			} else console.log(`Worker ${slot} finished ${claimed.website.url}: ${result.overallStatus}`);
+			// The result is written to the Google Sheet by the sheet sync loop below, which also retries anything that failed.
 			await maybeFinalizeRun(claimed.check.run);
-			console.log(`Worker ${slot} finished ${claimed.website.url}: ${result.overallStatus}`);
 		} catch (error) {
-			console.error(`Worker ${slot} failed checking ${claimed.website.url}:`, error);
+			const timedOut = limit.signal.aborted;
+			console.error(`Worker ${slot} ${timedOut ? 'stopped (time limit)' : 'failed'} checking ${claimed.website.url}:`, timedOut ? 'took too long' : error);
 			try {
-				await failCheck(claimed.check, error);
+				const outcome = await failCheck(claimed.check, error, { timedOut });
+				if (outcome.retry) console.log(`Worker ${slot} queued a retry for ${claimed.website.url}.`);
 				await maybeFinalizeRun(claimed.check.run);
 			} catch (queueError) {
 				console.error(`Worker ${slot} could not save the failed check:`, queueError);
 			}
+		} finally {
+			clearTimeout(timeLimit);
+			clearInterval(aliveSignal);
 		}
 	}
 }
@@ -76,6 +77,12 @@ async function main() {
 	const recovery = setInterval(() => {
 		recoverStaleChecks().catch((error) => console.error('Unable to recover stale checks:', error));
 	}, 15000);
+	// Results go to the sheet in batches and are retried until they are written, so a busy or unreachable Google API never drops an update.
+	const sheetSync = setInterval(() => {
+		syncPendingSheetRows().then((result) => {
+			if (result.synced) console.log(`Synced ${result.synced} results to the Google Sheet.`);
+		}).catch((error) => console.error('Google Sheet sync failed, will retry:', error.message));
+	}, 5000);
 	process.on('SIGTERM', () => { stopping = true; });
 	process.on('SIGINT', () => { stopping = true; });
 	try {
@@ -85,6 +92,7 @@ async function main() {
 	} finally {
 		clearInterval(heartbeat);
 		clearInterval(recovery);
+		clearInterval(sheetSync);
 		await updateWorkerHeartbeat('offline');
 		await browser.close();
 	}

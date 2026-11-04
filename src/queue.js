@@ -53,7 +53,7 @@ export async function enqueueRun({ type = 'manual', websiteIds = null, localRunD
 		queueable.push(...websites.filter((website) => bumpedIds.has(String(website._id))));
 	}
 
-	const run = await Run.create({ type, total: queueable.length, localRunDate });
+	const run = await Run.create({ type, total: queueable.length, localRunDate, scope: websiteIds?.length ? 'selected' : 'all' });
 	await Check.insertMany(queueable.map((website) => ({ run: run._id, website: website._id })));
 	return { created: true, skipped, runId: run._id.toString(), total: queueable.length };
 }
@@ -68,18 +68,22 @@ export async function claimNextCheck(workerId = `${os.hostname()}-${process.pid}
 	return { check, website: check.website };
 }
 export async function recoverStaleChecks() {
-	const lockTimeout = Math.max(config.checkTimeoutMs, config.navigationTimeoutMs) * 3;
-	const cutoff = new Date(Date.now() - lockTimeout);
-	const staleChecks = await Check.find({ status: 'processing', lockedAt: { $lt: cutoff } }).select('_id run attempts').lean();
+	// A live worker refreshes lockedAt every few seconds (see touchCheck), so only a check from a stopped worker goes silent this long.
+	const cutoff = new Date(Date.now() - config.lockStaleMs);
+	const staleChecks = await Check.find({ status: 'processing', lockedAt: { $lt: cutoff } }).select('_id run website attempts').lean();
 	for (const check of staleChecks) {
-		const shouldRetry = check.attempts < config.maxRetries;
-		const update = shouldRetry
-			? { $set: { status: 'pending', progressPercent: 0, progressStage: 'Recovered; retry queued', scheduledAt: new Date(), lockedAt: null, lockedBy: null, errorSummary: 'Worker stopped before completing this check; retry queued.' } }
-			: { $set: { status: 'critical', progressPercent: 100, progressStage: 'Worker stopped', finishedAt: new Date(), lockedAt: null, lockedBy: null, errorSummary: 'Worker stopped before completing this check; retry limit reached.' } };
-		await Check.findOneAndUpdate({ _id: check._id, status: 'processing', lockedAt: { $lt: cutoff } }, update);
+		if (check.attempts < config.maxRetries) {
+			await Check.findOneAndUpdate({ _id: check._id, status: 'processing', lockedAt: { $lt: cutoff } }, { $set: { status: 'pending', progressPercent: 0, progressStage: 'Recovered; retry queued', scheduledAt: new Date(), lockedAt: null, lockedBy: null, errorSummary: 'Worker stopped before completing this check; retry queued.' } });
+		} else {
+			await recordFailedCheck(check, 'Worker stopped before completing this check; retry limit reached.', { stage: 'Worker stopped', onlyIfLockedBefore: cutoff });
+		}
 		await maybeFinalizeRun(check.run);
 	}
 	return staleChecks.length;
+}
+// Called every few seconds while a worker is busy with a check, so a slow site is never mistaken for a stopped worker.
+export async function touchCheck(checkId) {
+	return Check.updateOne({ _id: checkId, status: 'processing' }, { $set: { lockedAt: new Date() } });
 }
 export async function updateCheckProgress(checkId, { percent, stage, mobileProgressPercent }) {
 	const update = {
@@ -92,7 +96,40 @@ export async function updateCheckProgress(checkId, { percent, stage, mobileProgr
 	return Check.findOneAndUpdate({ _id: checkId, status: 'processing' }, update);
 }
 export async function completeCheck(check, result) { const updated = await Check.findOneAndUpdate({ _id: check._id, status: 'processing' }, { $set: { status: result.overallStatus, progressPercent: 100, progressStage: 'Complete', finishedAt: new Date(), homepage: result.homepage, desktop: result.desktop, mobile: result.mobile, issues: result.issues, screenshots: result.screenshots, rawResult: result, errorSummary: result.issues.join('\n'), lockedAt: null, lockedBy: null } }); if (updated) await Website.findByIdAndUpdate(check.website, { lastCheck: check._id }); return Boolean(updated); }
-export async function failCheck(check, error) { const message = String(error?.stack || error?.message || error).slice(0, 8000); if (check.attempts < config.maxRetries) return Check.findOneAndUpdate({ _id: check._id, status: 'processing' }, { $set: { status: 'pending', progressPercent: 0, progressStage: 'Retry queued', scheduledAt: new Date(Date.now() + config.retryDelaySeconds * 1000), errorSummary: `Retry scheduled: ${message}`, lockedAt: null, lockedBy: null } }); return Check.findOneAndUpdate({ _id: check._id, status: 'processing' }, { $set: { status: 'critical', progressPercent: 100, progressStage: 'Failed', finishedAt: new Date(), errorSummary: message, lockedAt: null, lockedBy: null } }); }
+const shortReason = (error) => String(error?.message || error || 'Unknown error').split('\n')[0].replace(/\s+/g, ' ').slice(0, 220);
+
+// A check that could not finish still leaves a proper result behind, so the website shows what went wrong instead of "Not checked".
+export function buildFailureResult(reason, { timedOut = false } = {}) {
+	const skipped = { contact: { status: 'skipped' }, news: { status: 'skipped' } };
+	return {
+		overallStatus: 'critical',
+		homepage: { statusCode: null, loadTimeMs: null, sslValid: null, blank: false, timedOut, finalUrl: null, error: reason },
+		desktop: skipped,
+		mobile: skipped,
+		issues: [`Check could not be completed: ${reason}`],
+		screenshots: [],
+		failure: reason
+	};
+}
+
+async function recordFailedCheck(check, reason, { timedOut = false, stage = 'Failed', onlyIfLockedBefore = null } = {}) {
+	const result = buildFailureResult(reason, { timedOut });
+	const filter = { _id: check._id, status: 'processing', ...(onlyIfLockedBefore ? { lockedAt: { $lt: onlyIfLockedBefore } } : {}) };
+	const updated = await Check.findOneAndUpdate(filter, { $set: { status: result.overallStatus, progressPercent: 100, progressStage: stage, finishedAt: new Date(), homepage: result.homepage, desktop: result.desktop, mobile: result.mobile, issues: result.issues, screenshots: [], rawResult: result, errorSummary: reason, lockedAt: null, lockedBy: null } });
+	if (updated) await Website.findByIdAndUpdate(check.website, { lastCheck: check._id });
+	return updated ? result : null;
+}
+
+// Returns { retry: true } when another attempt was queued, or { retry: false, result } with the recorded failure result.
+export async function failCheck(check, error, { timedOut = false } = {}) {
+	const reason = timedOut ? `The check took longer than ${Math.round(config.checkMaxDurationMs / 1000)} seconds and was stopped.` : shortReason(error);
+	if (check.attempts < config.maxRetries) {
+		await Check.findOneAndUpdate({ _id: check._id, status: 'processing' }, { $set: { status: 'pending', progressPercent: 0, progressStage: 'Retry queued', scheduledAt: new Date(Date.now() + config.retryDelaySeconds * 1000), errorSummary: `Retry scheduled: ${reason}`, lockedAt: null, lockedBy: null } });
+		return { retry: true };
+	}
+	const result = await recordFailedCheck(check, reason, { timedOut });
+	return { retry: false, result };
+}
 export async function cancelRun(runId) { const now = new Date(); const run = await Run.findOneAndUpdate({ _id: runId, status: 'running' }, { $set: { status: 'cancelled', finishedAt: now } }, { new: true }); if (!run) return null; await Check.updateMany({ run: runId, status: { $in: ['pending', 'processing'] } }, { $set: { status: 'cancelled', progressStage: 'Cancelled', finishedAt: now, lockedAt: null, lockedBy: null } }); return run; }
 export async function maybeFinalizeRun(runId) {
 	const run = await Run.findById(runId).select('status').lean();

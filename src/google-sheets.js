@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { config } from './config.js';
-import { Setting } from './models.js';
+import { Check, Setting, Website } from './models.js';
 import { normalizeUrl } from './utils.js';
 
 const tokenUrl = 'https://oauth2.googleapis.com/token';
@@ -53,29 +53,59 @@ async function accessToken(refreshToken) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.access_token) {
-    throw new Error(`Google authorization expired or failed: ${data.error_description || data.error || response.statusText}`);
+    const revoked = data.error === 'invalid_grant'
+      || /expired|revoked|invalid grant/i.test(data.error_description || '');
+    if (revoked) {
+      await disconnectRevokedGoogleAccount();
+      const error = new Error('Google authorization expired or revoked. Reconnect your Google account, then try again.');
+      error.code = 'GOOGLE_AUTH_REVOKED';
+      throw error;
+    }
+    throw new Error(`Google authorization failed: ${data.error_description || data.error || response.statusText}`);
   }
   cachedAccessToken = { value: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
   return cachedAccessToken.value;
 }
 
+const retryableStatuses = new Set([429, 500, 502, 503, 504]);
+const maxSheetsAttempts = 4;
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Google answers 429 when too many requests arrive in a minute, and sometimes 5xx. Both are temporary, so they are retried with a growing delay.
 async function sheetsRequest(url, token, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(options.body ? { 'content-type': 'application/json' } : {}),
-      ...options.headers
+  for (let attempt = 1; ; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, {
+        ...options,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(options.body ? { 'content-type': 'application/json' } : {}),
+          ...options.headers
+        }
+      });
+    } catch (error) {
+      if (attempt >= maxSheetsAttempts) throw error;
+      await wait(1000 * 2 ** (attempt - 1));
+      continue;
     }
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    if (response.ok) return data;
+    if (retryableStatuses.has(response.status) && attempt < maxSheetsAttempts) {
+      const retryAfter = Number(response.headers?.get?.('retry-after'));
+      await wait(Math.min(30_000, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * 2 ** (attempt - 1) + Math.random() * 500));
+      continue;
+    }
     throw new Error(`Google Sheets request failed (${response.status}): ${data.error?.message || response.statusText}`);
   }
-  return data;
 }
 
 export function formatGoogleSheetStatus(result) {
+  const failure = result.failure || result.rawResult?.failure;
+  if (failure) {
+    const reason = compactError(failure);
+    return reason === 'Check failed' ? 'Check could not be completed' : `Check failed: ${reason}`;
+  }
   const issues = [];
   for (const [label, check] of [
     ['Desktop Contact', result.desktop?.contact],
@@ -115,6 +145,7 @@ function compactError(error) {
   if (knownErrors[code]) return knownErrors[code];
   const httpStatus = message.match(/\bHTTP\s+(\d{3})\b/i)?.[1];
   if (httpStatus) return `HTTP ${httpStatus}`;
+  if (/took longer than/i.test(message)) return 'Timed out';
   if (/timeout/i.test(message)) return 'Connection timed out';
   if (/ssl|certificate/i.test(message)) return 'SSL problem';
   if (/not added|missing/i.test(message)) return 'Not found';
@@ -273,12 +304,48 @@ export async function exchangeGoogleAuthorizationCode(code) {
 
 export async function googleSheetsStatus() {
   const values = await readSettings();
+  let connected = Boolean(values.refreshToken && values.email);
+  if (connected) {
+    try {
+      await accessToken(decryptSecret(values.refreshToken));
+    } catch (error) {
+      if (error.code !== 'GOOGLE_AUTH_REVOKED') throw error;
+      return {
+        configured: googleSheetsConfigured(),
+        connected: false,
+        email: null,
+        spreadsheetUrl: null,
+        pending: 0,
+        lastSyncError: null,
+        lastSyncAt: null
+      };
+    }
+  }
   return {
     configured: googleSheetsConfigured(),
-    connected: Boolean(values.refreshToken && values.email),
+    connected,
     email: values.email || null,
-    spreadsheetUrl: values.spreadsheetUrl || null
+    spreadsheetUrl: values.spreadsheetUrl || null,
+    // Results that are saved in the monitor but not yet written to the sheet.
+    pending: connected && values.spreadsheetId ? await pendingSheetRowCount() : 0,
+    lastSyncError: values.lastSyncError || null,
+    lastSyncAt: values.lastSyncAt || null
   };
+}
+
+async function disconnectRevokedGoogleAccount() {
+  cachedAccessToken = undefined;
+  await Setting.deleteMany({
+    key: {
+      $in: [
+        'googleSheets:refreshToken',
+        'googleSheets:email',
+        'googleSheets:spreadsheetId',
+        'googleSheets:spreadsheetUrl',
+        'googleSheets:worksheetTitle'
+      ]
+    }
+  });
 }
 
 async function connectedAccount() {
@@ -377,6 +444,72 @@ export async function syncWebsiteStatusToSheet(website, result) {
     body: JSON.stringify({ values: [googleSheetRow(website, result)] })
   });
   return true;
+}
+
+// A website is waiting for the sheet while its latest check differs from the check already written there.
+const pendingSheetFilter = { lastCheck: { $ne: null }, sortOrder: { $type: 'number' }, $expr: { $ne: ['$lastCheck', '$sheetSyncedCheck'] } };
+let sheetSyncRunning = false;
+let sheetSyncPausedUntil = 0;
+
+export function pendingSheetRowCount() {
+  return Website.countDocuments(pendingSheetFilter);
+}
+
+function rawWorksheetRange(sheetTitle, cells) {
+  return `'${sheetTitle.replace(/'/g, "''")}'!${cells}`;
+}
+
+// Writes every waiting result to the sheet in one request per batch. Nothing is lost when Google is slow or unreachable:
+// the websites simply stay "waiting" and the next run of this function sends them again.
+export async function syncPendingSheetRows({ force = false, batchSize = 100, maxBatches = 1 } = {}) {
+  if (sheetSyncRunning) return { synced: 0, busy: true };
+  if (!force && Date.now() < sheetSyncPausedUntil) return { synced: 0, waiting: true };
+  sheetSyncRunning = true;
+  let synced = 0;
+  try {
+    const values = await readSettings();
+    if (!values.spreadsheetId || !values.refreshToken) return { synced: 0 };
+    for (let batch = 0; batch < maxBatches; batch += 1) {
+      const websites = await Website.find(pendingSheetFilter).sort({ sortOrder: 1, _id: 1 }).limit(batchSize).select('url sortOrder lastCheck').lean();
+      if (!websites.length) break;
+      const checks = await Check.find({ _id: { $in: websites.map((website) => website.lastCheck) } }).lean();
+      const checkById = new Map(checks.map((check) => [String(check._id), check]));
+      const writable = websites.filter((website) => checkById.has(String(website.lastCheck)));
+      if (writable.length) {
+        const token = await accessToken(decryptSecret(values.refreshToken));
+        const { worksheetTitle, worksheetId } = await ensureDailyWorksheet(values.spreadsheetId, token);
+        if (values.worksheetTitle !== worksheetTitle) {
+          const spreadsheetUrl = spreadsheetUrlWithTab(values.spreadsheetId, worksheetId);
+          await saveSettings({ worksheetTitle, spreadsheetUrl, lastSpreadsheetUrl: spreadsheetUrl });
+          values.worksheetTitle = worksheetTitle;
+        }
+        await sheetsRequest(`${sheetsApi}/${encodeURIComponent(values.spreadsheetId)}/values:batchUpdate`, token, {
+          method: 'POST',
+          body: JSON.stringify({
+            valueInputOption: 'RAW',
+            data: writable.map((website) => ({
+              range: rawWorksheetRange(worksheetTitle, `A${website.sortOrder + 2}:C${website.sortOrder + 2}`),
+              values: [googleSheetRow(website, checkById.get(String(website.lastCheck)))]
+            }))
+          })
+        });
+      }
+      // Websites whose check no longer exists have nothing to write, so they are marked as done too. Only the exact check that was sent is marked, so a newer result is never skipped.
+      await Website.bulkWrite(websites.map((website) => ({
+        updateOne: { filter: { _id: website._id, lastCheck: website.lastCheck }, update: { $set: { sheetSyncedCheck: website.lastCheck } } }
+      })));
+      synced += writable.length;
+      if (websites.length < batchSize) break;
+    }
+    await saveSettings({ lastSyncAt: new Date().toISOString(), lastSyncError: '' });
+    return { synced };
+  } catch (error) {
+    sheetSyncPausedUntil = Date.now() + 30_000;
+    await saveSettings({ lastSyncError: error.message }).catch(() => {});
+    throw error;
+  } finally {
+    sheetSyncRunning = false;
+  }
 }
 
 export async function disableGoogleSheetSync() {
