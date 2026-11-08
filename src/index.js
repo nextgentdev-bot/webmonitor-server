@@ -133,7 +133,8 @@ app.get('/api/dashboard', async (req, res, next) => {
 		await ensureWebsiteOrder();
 		const search = String(req.query.search || '').trim();
 		const query = search ? { $or: [{ name: new RegExp(search, 'i') }, { url: new RegExp(search, 'i') }] } : {};
-		const [websites, total, active, latestRun, activeRun, progressWebsites, newestActiveWebsite, worker] = await Promise.all([
+		const pausedCheckFilter = { active: true, $or: ['homepage', 'loadTime', 'news', 'contact'].map((key) => ({ [`pausedChecks.${key}.paused`]: true })) };
+		const [websites, total, active, latestRun, activeRun, progressWebsites, newestActiveWebsite, worker, pausedCheckWebsites] = await Promise.all([
 			Website.find(query).sort({ sortOrder: 1, _id: 1 }).limit(config.maxWebsites).populate('lastCheck').lean(),
 			Website.countDocuments(query),
 			Website.countDocuments({ ...query, active: true }),
@@ -141,7 +142,9 @@ app.get('/api/dashboard', async (req, res, next) => {
 			Run.findOne({ status: 'running' }).sort({ startedAt: -1 }).lean(),
 			Website.find().select('active lastCheck').populate('lastCheck', 'status progressPercent').lean(),
 			Website.findOne({ active: true }).sort({ createdAt: -1 }).select('createdAt').lean(),
-			getWorkerStatus()
+			getWorkerStatus(),
+			// Not affected by the search box, so the paused-check counts and lists stay complete.
+			Website.find(pausedCheckFilter).sort({ sortOrder: 1, _id: 1 }).populate('lastCheck').lean()
 		]);
 		const latestRunIsStale = Boolean(latestRun && newestActiveWebsite && newestActiveWebsite.createdAt > latestRun.startedAt);
 		const healthy = countHealthyWebsites(progressWebsites);
@@ -167,7 +170,7 @@ app.get('/api/dashboard', async (req, res, next) => {
 			...website,
 			...(website.active && progressRun && checksByWebsite.has(String(website._id)) ? { currentCheck: checksByWebsite.get(String(website._id)) } : {})
 		}));
-		res.json({ websites: dashboardWebsites, stats: { total, active, healthy, latestRun, latestRunIsStale, runProgress, worker } });
+		res.json({ websites: dashboardWebsites, pausedCheckWebsites, stats: { total, active, healthy, latestRun, latestRunIsStale, runProgress, worker } });
 	} catch (error) { next(error); }
 });
 app.get('/api/worker/status', async (_req, res, next) => {
