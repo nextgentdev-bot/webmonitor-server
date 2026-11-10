@@ -32,7 +32,7 @@ const checkSchema = new mongoose.Schema({
   lockedBy: String,
   startedAt: Date,
   finishedAt: Date,
-  homepage: { statusCode: Number, loadTimeMs: Number, sslValid: Boolean, blank: Boolean, finalUrl: String, error: String },
+  homepage: { statusCode: Number, loadTimeMs: Number, sslValid: Boolean, blank: Boolean, suspended: Boolean, finalUrl: String, error: String },
   desktop: { contact: Object, news: Object },
   mobile: { contact: Object, news: Object },
   issues: [String],

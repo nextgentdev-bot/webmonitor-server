@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult } from './monitor.js';
+import { getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, isMobileMenuOpenState, isSuspendedPage, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult } from './monitor.js';
 import { countHealthyWebsites, defaultGoogleSheetTab, latestCheckPerWebsite, parseGoogleSheetRows, summarizeWebsiteProgress } from './utils.js';
 
 test('normalizes mixed Bengali and English navigation labels', () => {
@@ -76,6 +76,14 @@ test('classifies slow and navigation-timeout homepages as warnings, not critical
   assert.equal(getOverallStatus({ statusCode: 503, sslValid: true }, ['Main website returned HTTP 503.']), 'critical');
 });
 
+test('detects suspended pages from provider URLs and page text, and marks them critical', () => {
+  assert.equal(isSuspendedPage('https://guicloud.in/cgi-sys/suspendedpage.cgi', '', ''), true);
+  assert.equal(isSuspendedPage('https://example.com/', 'Account Suspended', 'This Account has been suspended.'), true);
+  assert.equal(isSuspendedPage('https://example.com/', 'Welcome', 'A normal website homepage.'), false);
+  assert.equal(getOverallStatus({ statusCode: 200, suspended: true }, ['Main website account is suspended.']), 'critical');
+  assert.equal(getOverallStatus({ statusCode: 200, suspended: true }, [], { homepagePaused: true }), 'critical');
+});
+
 test('ignores absent News navigation only when the main-domain /news page does not exist', () => {
   assert.equal(resolveNewsCheckResult({ status: 'missing' }, true).status, 'missing');
   assert.equal(resolveNewsCheckResult({ status: 'missing' }, false).status, 'skipped');
@@ -90,6 +98,13 @@ test('recognizes English and Bengali mobile menu controls', () => {
   assert.equal(isMobileMenuControlLabel('Primary main-navigation grid-container site-navigation'), false);
   assert.equal(isMobileMenuControlLabel('মেনু খুলুন'), true);
   assert.equal(isMobileMenuControlLabel('Search the site'), false);
+});
+
+test('does not mistake a closed mobile menu for an open one', () => {
+  assert.equal(isMobileMenuOpenState({ expanded: 'false', indicatesClose: false, controlledNavigationVisible: false }), false);
+  assert.equal(isMobileMenuOpenState({ expanded: 'false', indicatesClose: false, controlledNavigationVisible: true }), false);
+  assert.equal(isMobileMenuOpenState({ expanded: 'true', indicatesClose: false, controlledNavigationVisible: false }), true);
+  assert.equal(isMobileMenuOpenState({ indicatesClose: false, controlledNavigationVisible: true }), true);
 });
 
 test('imports the first website row when a Google Sheet has no header', () => {

@@ -28,6 +28,10 @@ test('contact, news and homepage failures are summarized in the sheet', () => {
   assert.equal(formatGoogleSheetStatus({
     homepage: { statusCode: null, sslValid: true, error: 'page.goto: net::ERR_CONNECTION_REFUSED' }
   }), 'Homepage: Connection refused');
+  assert.equal(formatGoogleSheetStatus({
+    homepage: { statusCode: 200, suspended: true },
+    pausedChecks: ['homepage']
+  }), 'Homepage: Account suspended');
 });
 
 test('builds a Google OAuth URL with the registered redirect URI and private sheet scopes', () => {

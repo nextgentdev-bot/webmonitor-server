@@ -197,19 +197,36 @@ async function findMobileMenuButton(page) {
   return null;
 }
 
+export function isMobileMenuOpenState({ expanded, indicatesClose, controlledNavigationVisible }) {
+  if (expanded === 'true') return true;
+  if (expanded === 'false') return false;
+  return indicatesClose || controlledNavigationVisible;
+}
+
 async function isMobileMenuOpen(page, button) {
   if (!button) return false;
   const buttonState = await button.evaluate((element) => {
     const label = `${element.innerText || ''} ${element.getAttribute('aria-label') || ''} ${element.getAttribute('title') || ''}`;
-    const expanded = element.getAttribute('aria-expanded') === 'true';
+    const expanded = element.getAttribute('aria-expanded');
     const indicatesClose = /\b(close|hide)\b/i.test(label) || /বন্ধ|বন্ধ করুন/.test(label);
     const controlledNavigationVisible = (element.getAttribute('aria-controls') || '').split(/\s+/).some((id) => {
       const target = document.getElementById(id);
-      return Boolean(target && target.getClientRects().length > 0);
+      if (!target || target.getAttribute('aria-hidden') === 'true') return false;
+      const style = getComputedStyle(target);
+      const rect = target.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && Number(style.opacity) > 0
+        && rect.width > 0
+        && rect.height > 0
+        && rect.right > 0
+        && rect.left < window.innerWidth
+        && rect.bottom > 0
+        && rect.top < window.innerHeight;
     });
-    return expanded || indicatesClose || controlledNavigationVisible;
+    return { expanded, indicatesClose, controlledNavigationVisible };
   }).catch(() => false);
-  if (buttonState) return true;
+  if (buttonState && typeof buttonState === 'object' && isMobileMenuOpenState(buttonState)) return true;
   return Boolean(await findLink(page, 'contact') || await findLink(page, 'news'));
 }
 
@@ -262,8 +279,20 @@ export function getHomepageCandidates(url) {
   }
 }
 
+export function isSuspendedPage(url, title, bodyText) {
+  let pathname = '';
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    pathname = String(url || '');
+  }
+  if (/\/suspendedpage\.cgi(?:\/|$)/i.test(pathname)) return true;
+  return /\b(?:this\s+)?(?:account|website|site|domain)\s+(?:has\s+been\s+|is\s+)?suspended\b/i.test(`${title || ''}\n${bodyText || ''}`);
+}
+
 export function getOverallStatus(homepage, issues, { homepagePaused = false } = {}) {
   const unreachable = !homepage.statusCode && !homepage.timedOut;
+  if (homepage.suspended) return 'critical';
   // A paused homepage check can never make the website critical.
   return !homepagePaused && (unreachable || homepage.statusCode >= 500 || homepage.sslValid === false)
     ? 'critical'
@@ -300,7 +329,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     if (signal?.aborted) closeContexts();
     const desktop = await desktopContext.newPage();
     desktop.setDefaultNavigationTimeout(config.navigationTimeoutMs);
-    let homepage = { statusCode: null, loadTimeMs: null, sslValid: null, blank: false, timedOut: false, finalUrl: website.url, error: null };
+    let homepage = { statusCode: null, loadTimeMs: null, sslValid: null, blank: false, suspended: false, timedOut: false, finalUrl: website.url, error: null };
 
     const homepageCandidates = getHomepageCandidates(website.url);
     let lastHomepageError = null;
@@ -309,10 +338,15 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
         const started = Date.now();
         const response = await desktop.goto(candidate, { waitUntil: 'domcontentloaded' });
         const candidateStatus = response?.status() ?? null;
-        const loaded = { ...homepage, statusCode: candidateStatus, loadTimeMs: Date.now() - started, sslValid: true, blank: await desktop.locator('body').innerText().then((text) => text.trim().length < 20).catch(() => false), timedOut: false, finalUrl: desktop.url(), error: null };
+        const bodyText = await desktop.locator('body').innerText().catch(() => '');
+        const finalUrl = desktop.url();
+        const suspended = isSuspendedPage(finalUrl, await desktop.title().catch(() => ''), bodyText);
+        const loaded = { ...homepage, statusCode: candidateStatus, loadTimeMs: Date.now() - started, sslValid: true, blank: bodyText.trim().length < 20, suspended: homepage.suspended || suspended, timedOut: false, finalUrl, error: null };
         homepage = loaded;
         if (response && candidateStatus < 400 && !loaded.blank) break;
-        lastHomepageError = `Main website responded with HTTP ${candidateStatus ?? 'no response'}${loaded.blank ? ' and the page body is blank' : ''}.`;
+        lastHomepageError = suspended
+          ? 'Main website account is suspended.'
+          : `Main website responded with HTTP ${candidateStatus ?? 'no response'}${loaded.blank ? ' and the page body is blank' : ''}.`;
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
         homepage.timedOut = error.name === 'TimeoutError' || /timeout/i.test(error.message);
@@ -321,7 +355,9 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
         homepage.sslValid = !/ssl|certificate|cert_/i.test(error.message);
       }
     }
-    if (((!homepage.statusCode && !homepage.timedOut) || homepage.statusCode >= 400 || homepage.blank) && !paused.has('homepage')) {
+    if (homepage.suspended) {
+      issues.push('Main website account is suspended.');
+    } else if (((!homepage.statusCode && !homepage.timedOut) || homepage.statusCode >= 400 || homepage.blank) && !paused.has('homepage')) {
       issues.push(lastHomepageError || 'Main website could not be opened successfully.');
     }
     if (homepage.timedOut && !issues.some((issue) => issue.startsWith('Main website could not be opened'))) {
@@ -332,10 +368,14 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     if (homepage.loadTimeMs > config.slowPageMs && !paused.has('loadTime')) issues.push(`Main website is slow (${homepage.loadTimeMs} ms).`);
     await reportStep(paused.has('homepage') && paused.has('loadTime') ? 'Homepage paused' : 'Homepage checked');
 
-    const mainNewsPage = paused.has('news') ? { exists: false } : await checkMainNewsPage(desktopContext, homepage.finalUrl);
+    const mainNewsPage = paused.has('news') || homepage.suspended ? { exists: false } : await checkMainNewsPage(desktopContext, homepage.finalUrl);
     const stepFailure = (label, error) => ({ status: 'error', url: null, statusCode: null, error: `${label} could not be checked: ${String(error?.message || error).split('\n')[0].slice(0, 160)}` });
     const desktopChecks = (async () => {
       try {
+      if (homepage.suspended) {
+        await reportStep('Desktop checks skipped', 2);
+        return [{ status: 'skipped' }, { status: 'skipped' }];
+      }
       let contact = pausedResult();
       if (!paused.has('contact')) {
         const contactFound = await findContactLink(desktop);
@@ -372,7 +412,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
         await reportStep('Mobile checks paused', 2, { mobileProgressPercent: 100 });
         return { contact: pausedResult(), news: pausedResult() };
       }
-      if (!homepage.statusCode || homepage.statusCode >= 500) {
+      if (homepage.suspended || !homepage.statusCode || homepage.statusCode >= 500) {
         await reportStep('Mobile checks skipped', 2, { mobileProgressPercent: 100 });
         return { contact: { status: 'skipped' }, news: { status: 'skipped' } };
       }
