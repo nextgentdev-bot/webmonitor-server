@@ -117,8 +117,9 @@ async function findLink(page, type, { includeHidden = false } = {}) {
         fallback ||= match;
         continue;
       }
-      if (type !== 'news' || isPrimaryNewsLabel(normalizeMenuLabel(label))) return match;
-      fallback ||= match;
+      if (type !== 'news') return match;
+      if (isMainNewsPath(href, page.url())) return match;
+      if (isPrimaryNewsLabel(normalizeMenuLabel(label))) fallback ||= match;
     }
   }
   return fallback;
@@ -171,6 +172,7 @@ async function findContactLink(page, { includeHidden = false } = {}) {
 
 async function findMobileMenuButton(page) {
   const buttons = page.locator(menuButtonSelectors);
+  let structuralFallback = null;
   for (let index = 0; index < Math.min(await buttons.count(), 100); index += 1) {
     const button = buttons.nth(index);
     if (!await button.isVisible().catch(() => false)) continue;
@@ -192,9 +194,10 @@ async function findMobileMenuButton(page) {
       const hasNavigationRole = target.matches('nav, [role="navigation"], [role="menu"]') || target.querySelector('nav, [role="navigation"], [role="menu"]');
       return Boolean(hasNavigationRole || (/\b(menu|nav|navigation|navbar)\b/i.test(targetDescription) && target.querySelector('a[href]')));
     }));
-    if (isMobileMenuControlLabel(description) || hasToggleStructure || controlsNavigation) return button;
+    if (controlsNavigation || isMobileMenuControlLabel(description)) return button;
+    if (hasToggleStructure) structuralFallback ||= button;
   }
-  return null;
+  return structuralFallback;
 }
 
 export function isMobileMenuOpenState({ expanded, indicatesClose, controlledNavigationVisible }) {
@@ -226,6 +229,7 @@ async function isMobileMenuOpen(page, button) {
     });
     return { expanded, indicatesClose, controlledNavigationVisible };
   }).catch(() => false);
+  if (buttonState && typeof buttonState === 'object' && buttonState.expanded === 'false') return false;
   if (buttonState && typeof buttonState === 'object' && isMobileMenuOpenState(buttonState)) return true;
   return Boolean(await findLink(page, 'contact') || await findLink(page, 'news'));
 }
