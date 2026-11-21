@@ -260,7 +260,10 @@ async function checkMainNewsPage(context, homepageUrl) {
       timeout: config.navigationTimeoutMs,
       failOnStatusCode: false
     });
-    return { exists: response.status() >= 200 && response.status() < 400, url: response.url(), statusCode: response.status(), error: null };
+    const resolvedUrl = response.url();
+    const exists = response.status() >= 200 && response.status() < 400
+      && isMainNewsPath(resolvedUrl, homepageUrl);
+    return { exists, url: resolvedUrl, statusCode: response.status(), error: null };
   } catch (error) {
     console.warn(`Unable to verify the main-domain /news page at ${homepageUrl}:`, error.message);
     return { exists: false, url: new URL('/news', homepageUrl).toString(), statusCode: null, error: error.message };

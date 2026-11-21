@@ -91,6 +91,11 @@ test('ignores absent News navigation only when the main-domain /news page does n
   assert.equal(resolveNewsCheckResult({ status: 'error' }, false).status, 'error');
 });
 
+test('does not treat a redirect to the homepage as an existing News page', () => {
+  assert.equal(isMainNewsPath('https://tainiomania.io/', 'https://tainiomania.io/'), false);
+  assert.equal(isMainNewsPath('https://tainiomania.io/news', 'https://tainiomania.io/'), true);
+});
+
 test('recognizes English and Bengali mobile menu controls', () => {
   assert.equal(isMobileMenuControlLabel('Open main navigation'), true);
   assert.equal(isMobileMenuControlLabel('Toggle navigation'), true);

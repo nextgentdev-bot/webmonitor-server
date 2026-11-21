@@ -258,14 +258,14 @@ async function writeResultsRows(spreadsheetId, rows, token) {
 }
 
 export function googleSheetsConfigured() {
-  return Boolean(config.googleOAuthClientId && config.googleOAuthClientSecret && config.googleOAuthRedirectUri);
+  return Boolean(config.googleOAuthClientId && config.googleOAuthClientSecret);
 }
 
-export function createGoogleAuthorizationUrl(state) {
-  if (!googleSheetsConfigured()) throw new Error('Google OAuth is not configured on the server.');
+export function createGoogleAuthorizationUrl(state, redirectUri = config.googleOAuthRedirectUri) {
+  if (!googleSheetsConfigured() || !redirectUri) throw new Error('Google OAuth is not configured on the server.');
   const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   url.searchParams.set('client_id', config.googleOAuthClientId);
-  url.searchParams.set('redirect_uri', config.googleOAuthRedirectUri);
+  url.searchParams.set('redirect_uri', redirectUri);
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('scope', 'openid email https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file');
   url.searchParams.set('access_type', 'offline');
@@ -274,8 +274,8 @@ export function createGoogleAuthorizationUrl(state) {
   return url.toString();
 }
 
-export async function exchangeGoogleAuthorizationCode(code) {
-  if (!googleSheetsConfigured()) throw new Error('Google OAuth is not configured on the server.');
+export async function exchangeGoogleAuthorizationCode(code, redirectUri = config.googleOAuthRedirectUri) {
+  if (!googleSheetsConfigured() || !redirectUri) throw new Error('Google OAuth is not configured on the server.');
   const response = await fetch(tokenUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -283,7 +283,7 @@ export async function exchangeGoogleAuthorizationCode(code) {
       code,
       client_id: config.googleOAuthClientId,
       client_secret: config.googleOAuthClientSecret,
-      redirect_uri: config.googleOAuthRedirectUri,
+      redirect_uri: redirectUri,
       grant_type: 'authorization_code'
     })
   });

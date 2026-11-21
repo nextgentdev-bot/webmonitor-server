@@ -16,6 +16,16 @@ import { createGoogleAuthorizationUrl, createResultsSheet, disableGoogleSheetSyn
 
 const app = express(); const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 app.use(cors({ origin: config.clientOrigin })); app.use(express.json({ limit: '2mb' }));
+app.set('trust proxy', 1);
+
+function googleOAuthCallbackUrl(req) {
+	if (config.googleOAuthRedirectUri) return config.googleOAuthRedirectUri;
+	const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+	const protocol = forwardedProto || req.protocol;
+	const host = req.get('host');
+	if (!host) throw new Error('Google OAuth callback host could not be determined.');
+	return `${protocol}://${host}/api/google-sheets/oauth/callback`;
+}
 function googleSheetCsvUrl(input) {
 	const value = String(input || '').trim();
 	const match = value.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
@@ -46,7 +56,7 @@ app.get('/api/google-sheets/oauth/callback', async (req, res) => {
 		if (state.purpose !== 'google-sheets-oauth' || !state.username || !req.query.code) {
 			throw new Error('Google authorization response could not be verified.');
 		}
-		await exchangeGoogleAuthorizationCode(String(req.query.code));
+		await exchangeGoogleAuthorizationCode(String(req.query.code), googleOAuthCallbackUrl(req));
 		res.redirect(`${config.clientOrigin.replace(/\/$/, '')}/?googleSheets=connected`);
 	} catch (error) {
 		console.error('Google Sheets account connection failed:', error.message);
@@ -101,7 +111,7 @@ app.get('/api/google-sheets/status', async (_req, res, next) => { try { res.json
 app.get('/api/google-sheets/oauth/url', (req, res, next) => {
 	try {
 		const state = jwt.sign({ purpose: 'google-sheets-oauth', username: req.user.username, nonce: randomBytes(16).toString('hex') }, config.jwtSecret, { expiresIn: '10m' });
-		res.json({ url: createGoogleAuthorizationUrl(state) });
+		res.json({ url: createGoogleAuthorizationUrl(state, googleOAuthCallbackUrl(req)) });
 	} catch (error) { next(error); }
 });
 app.post('/api/google-sheets/create', async (req, res, next) => {
