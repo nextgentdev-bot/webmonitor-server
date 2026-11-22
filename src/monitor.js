@@ -2,25 +2,25 @@ import { config } from './config.js';
 import { pausedKeySet } from './check-options.js';
 
 const navigationSelectors = [
-  'nav a[href]',
-  '[role="navigation"] a[href]',
-  'header a[href]',
-  '[class*="menu" i] a[href]',
-  '[id*="menu" i] a[href]',
-  '[class*="nav" i] a[href]',
-  '[id*="nav" i] a[href]',
-  '[aria-label*="navigation" i] a[href]',
-  '[role="menu"] a[href]'
+  'nav a[href], nav button, nav [role="button"], nav [role="link"]',
+  '[role="navigation"] a[href], [role="navigation"] button, [role="navigation"] [role="button"], [role="navigation"] [role="link"]',
+  'header a[href], header button, header [role="button"], header [role="link"]',
+  '[class*="menu" i] a[href], [class*="menu" i] button, [class*="menu" i] [role="button"], [class*="menu" i] [role="link"]',
+  '[id*="menu" i] a[href], [id*="menu" i] button, [id*="menu" i] [role="button"], [id*="menu" i] [role="link"]',
+  '[class*="nav" i] a[href], [class*="nav" i] button, [class*="nav" i] [role="button"], [class*="nav" i] [role="link"]',
+  '[id*="nav" i] a[href], [id*="nav" i] button, [id*="nav" i] [role="button"], [id*="nav" i] [role="link"]',
+  '[aria-label*="navigation" i] a[href], [aria-label*="navigation" i] button, [aria-label*="navigation" i] [role="button"], [aria-label*="navigation" i] [role="link"]',
+  '[role="menu"] a[href], [role="menu"] button, [role="menu"] [role="button"], [role="menu"] [role="link"]'
 ];
 const mobileNavigationSelectors = [
-  '[class*="offcanvas" i] a[href]',
-  '[id*="offcanvas" i] a[href]',
-  '[class*="drawer" i] a[href]',
-  '[id*="drawer" i] a[href]',
-  '[class*="mobile" i] a[href]',
-  '[id*="mobile" i] a[href]',
-  '[class*="collapse" i] a[href]',
-  '[aria-hidden="false"] nav a[href]',
+  '[class*="offcanvas" i] a[href], [class*="offcanvas" i] button, [class*="offcanvas" i] [role="button"], [class*="offcanvas" i] [role="link"]',
+  '[id*="offcanvas" i] a[href], [id*="offcanvas" i] button, [id*="offcanvas" i] [role="button"], [id*="offcanvas" i] [role="link"]',
+  '[class*="drawer" i] a[href], [class*="drawer" i] button, [class*="drawer" i] [role="button"], [class*="drawer" i] [role="link"]',
+  '[id*="drawer" i] a[href], [id*="drawer" i] button, [id*="drawer" i] [role="button"], [id*="drawer" i] [role="link"]',
+  '[class*="mobile" i] a[href], [class*="mobile" i] button, [class*="mobile" i] [role="button"], [class*="mobile" i] [role="link"]',
+  '[id*="mobile" i] a[href], [id*="mobile" i] button, [id*="mobile" i] [role="button"], [id*="mobile" i] [role="link"]',
+  '[class*="collapse" i] a[href], [class*="collapse" i] button, [class*="collapse" i] [role="button"], [class*="collapse" i] [role="link"]',
+  '[aria-hidden="false"] nav a[href], [aria-hidden="false"] nav button, [aria-hidden="false"] nav [role="button"], [aria-hidden="false"] nav [role="link"]',
   'a[href]'
 ];
 const menuButtonSelectors = 'button, [role="button"], [aria-controls], [aria-expanded], [data-bs-toggle="collapse"], [data-toggle="collapse"], [id*="toggler" i], [class*="toggler" i], [class*="menu-toggle" i], [class*="hamburger" i], [class*="navbar-toggler" i], [class*="mobile-menu" i], [class*="nav-toggle" i]';
@@ -44,9 +44,9 @@ export function normalizeMenuLabel(text) {
 export function matchesMenuLabel(text, type) {
   const normalized = normalizeMenuLabel(text);
   if (type === 'contact') return matchesAnyPhrase(normalized, [
-    'contact', 'contacts', 'contact us', 'contact page', 'contact our team', 'contact team', 'get in touch', 'reach us',
+    'contact', 'contacts', 'contact me', 'contact us', 'contact page', 'contact our team', 'contact team', 'get in touch', 'reach us',
     'contato', 'contate nos', 'fale conosco', 'fale com', 'entre em contato',
-    'contacto', 'contactanos', 'ponte en contacto', 'contáctanos', 'contáctenos',
+    'contacto', 'contactanos', 'contacta con nosotras', 'contacta con nosotros', 'contacte con nosotros', 'contacta con', 'ponte en contacto', 'contáctanos', 'contáctenos',
     'nous contacter', 'contactez nous', 'kontakt', 'kontaktieren sie uns',
     'contatto', 'contatti', 'contattaci', 'contattateci', 'contacte',
     'contacteer ons', 'neem contact op', 'skontaktuj się', 'kontakt', 'kontakta oss', 'kontakt os', 'yhteystiedot',
@@ -89,7 +89,7 @@ export function isIgnoredNewsCategoryPath(href, baseUrl) {
 function isPrimaryNewsLabel(text) {
   return matchesAnyPhrase(text, [
     'news', 'updates', 'announcements', 'press releases',
-    'noticias', 'notícias', 'actualités', 'nouvelles', 'nachrichten', 'notizie', 'nieuws',
+    'noticias', 'notícias', 'actualidad', 'actualité', 'actualités', 'nouvelles', 'nachrichten', 'neuigkeiten', 'notizie', 'nieuws',
     'wiadomości', 'новости', 'новини', 'أخبار', 'اخبار', 'ニュース', '新闻', '新聞', '뉴스',
     'haberler', 'berita', 'tin tức', 'समाचार', 'খবর', 'সংবাদ', 'নিউজ', 'প্রেস রিলিজ', 'বিজ্ঞপ্তি',
     'nyheter', 'nyheder', 'uutiset', 'ειδήσεις', 'ข่าว', 'balita'
@@ -108,11 +108,23 @@ async function findLink(page, type, { includeHidden = false } = {}) {
     const links = page.locator(selector);
     for (let index = 0; index < Math.min(await links.count(), 500); index += 1) {
       const link = links.nth(index);
-      if ((!includeHidden || selector === 'a[href]') && !await link.isVisible().catch(() => false)) continue;
+      const visible = await link.isVisible().catch(() => false);
+      if (!visible) {
+        if (!includeHidden || selector === 'a[href]') continue;
+        const isButton = await link.evaluate((element) => element.matches('button, [role="button"]')).catch(() => false);
+        if (isButton) continue;
+      }
       const label = await textOf(link);
       if (!matchesMenuLabel(label, type)) continue;
-      const href = await link.getAttribute('href');
-      const match = { href };
+      const match = await link.evaluate((element) => ({
+        href: element.getAttribute('href')
+          || element.getAttribute('data-href')
+          || element.getAttribute('data-url')
+          || element.getAttribute('formaction')
+          || element.closest('a[href]')?.getAttribute('href')
+          || null,
+        kind: element.matches('button, [role="button"]') ? 'button' : 'link'
+      }));
       if (type === 'news' && isIgnoredNewsCategoryPath(href, page.url())) {
         fallback ||= match;
         continue;
@@ -240,6 +252,7 @@ async function checkMenu(page, context, type, { includeHidden = false, found: su
   if (type === 'news' && isIgnoredNewsCategoryPath(found.href, page.url())) {
     return { status: 'skipped', url: found.href, statusCode: null };
   }
+  if (!found.href && found.kind === 'button') return { status: 'working', url: null, statusCode: null };
   if (!found.href || found.href.trim() === '#' || /^javascript:/i.test(found.href.trim())) return { status: 'error', url: null, statusCode: null, error: 'Menu item has no destination URL.' };
   const href = found.href ? new URL(found.href, page.url()).toString() : '';
   if (!href) return { status: 'error', url: null, statusCode: null, error: 'Menu item has no link URL.' };

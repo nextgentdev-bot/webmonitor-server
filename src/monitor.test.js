@@ -11,6 +11,7 @@ test('normalizes mixed Bengali and English navigation labels', () => {
 test('matches English contact and news labels in phrases', () => {
   assert.equal(matchesMenuLabel('Contact', 'contact'), true);
   assert.equal(matchesMenuLabel('Contact Us', 'contact'), true);
+  assert.equal(matchesMenuLabel('Contact Me', 'contact'), true);
   assert.equal(matchesMenuLabel('CONTACT-US', 'contact'), true);
   assert.equal(matchesMenuLabel('Contact Our Team', 'contact'), true);
   assert.equal(matchesMenuLabel('Get in touch with us', 'contact'), true);
@@ -33,10 +34,13 @@ test('matches Portuguese, Spanish, French, Arabic and Japanese menu labels', () 
   assert.equal(matchesMenuLabel('Contate-nos', 'contact'), true);
   assert.equal(matchesMenuLabel('Fale conosco', 'contact'), true);
   assert.equal(matchesMenuLabel('Contáctanos', 'contact'), true);
+  assert.equal(matchesMenuLabel('Contacta con nosotras', 'contact'), true);
+  assert.equal(matchesMenuLabel('Contacta con nosotros', 'contact'), true);
   assert.equal(matchesMenuLabel('Nous contacter', 'contact'), true);
   assert.equal(matchesMenuLabel('اتصل بنا', 'contact'), true);
   assert.equal(matchesMenuLabel('お問い合わせ', 'contact'), true);
   assert.equal(matchesMenuLabel('Notícias', 'news'), true);
+  assert.equal(matchesMenuLabel('Actualidad', 'news'), true);
   assert.equal(matchesMenuLabel('Actualités', 'news'), true);
   assert.equal(matchesMenuLabel('Новости', 'news'), true);
   assert.equal(matchesMenuLabel('新闻', 'news'), true);
