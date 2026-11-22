@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, isMobileMenuOpenState, isSuspendedPage, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult } from './monitor.js';
+import { getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, isMobileMenuOpenState, isSuspendedPage, isVerificationChallengePage, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult } from './monitor.js';
 import { countHealthyWebsites, defaultGoogleSheetTab, latestCheckPerWebsite, parseGoogleSheetRows, summarizeWebsiteProgress } from './utils.js';
 
 test('normalizes mixed Bengali and English navigation labels', () => {
@@ -82,6 +82,13 @@ test('detects suspended pages from provider URLs and page text, and marks them c
   assert.equal(isSuspendedPage('https://example.com/', 'Welcome', 'A normal website homepage.'), false);
   assert.equal(getOverallStatus({ statusCode: 200, suspended: true }, ['Main website account is suspended.']), 'critical');
   assert.equal(getOverallStatus({ statusCode: 200, suspended: true }, [], { homepagePaused: true }), 'critical');
+});
+
+test('recognizes browser verification pages without mistaking ordinary homepages for challenges', () => {
+  assert.equal(isVerificationChallengePage('Just a moment...', 'Verify you are human by completing the action below.'), true);
+  assert.equal(isVerificationChallengePage('Just a moment...', 'Security verification is in progress.'), true);
+  assert.equal(isVerificationChallengePage('Welcome', 'Verify you are human by completing the action below.'), false);
+  assert.equal(isVerificationChallengePage('Just a moment...', 'Welcome to our website.'), false);
 });
 
 test('ignores absent News navigation only when the main-domain /news page does not exist', () => {

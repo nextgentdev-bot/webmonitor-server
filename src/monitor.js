@@ -297,6 +297,13 @@ export function isSuspendedPage(url, title, bodyText) {
   return /\b(?:this\s+)?(?:account|website|site|domain)\s+(?:has\s+been\s+|is\s+)?suspended\b/i.test(`${title || ''}\n${bodyText || ''}`);
 }
 
+export function isVerificationChallengePage(title, bodyText) {
+  const titleText = String(title || '');
+  const body = String(bodyText || '');
+  return /\bjust a moment\b/i.test(titleText)
+    && /\b(?:verify you are human|confirm that you are a human|checking your browser|security verification)\b/i.test(body);
+}
+
 export function getOverallStatus(homepage, issues, { homepagePaused = false } = {}) {
   const unreachable = !homepage.statusCode && !homepage.timedOut;
   if (homepage.suspended) return 'critical';
@@ -336,7 +343,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     if (signal?.aborted) closeContexts();
     const desktop = await desktopContext.newPage();
     desktop.setDefaultNavigationTimeout(config.navigationTimeoutMs);
-    let homepage = { statusCode: null, loadTimeMs: null, sslValid: null, blank: false, suspended: false, timedOut: false, finalUrl: website.url, error: null };
+    let homepage = { statusCode: null, loadTimeMs: null, sslValid: null, blank: false, suspended: false, verificationRequired: false, timedOut: false, finalUrl: website.url, error: null };
 
     const homepageCandidates = getHomepageCandidates(website.url);
     let lastHomepageError = null;
@@ -347,9 +354,12 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
         const candidateStatus = response?.status() ?? null;
         const bodyText = await desktop.locator('body').innerText().catch(() => '');
         const finalUrl = desktop.url();
-        const suspended = isSuspendedPage(finalUrl, await desktop.title().catch(() => ''), bodyText);
-        const loaded = { ...homepage, statusCode: candidateStatus, loadTimeMs: Date.now() - started, sslValid: true, blank: bodyText.trim().length < 20, suspended: homepage.suspended || suspended, timedOut: false, finalUrl, error: null };
+        const title = await desktop.title().catch(() => '');
+        const suspended = isSuspendedPage(finalUrl, title, bodyText);
+        const verificationRequired = isVerificationChallengePage(title, bodyText);
+        const loaded = { ...homepage, statusCode: candidateStatus, loadTimeMs: Date.now() - started, sslValid: true, blank: bodyText.trim().length < 20, suspended: homepage.suspended || suspended, verificationRequired: homepage.verificationRequired || verificationRequired, timedOut: false, finalUrl, error: null };
         homepage = loaded;
+        if (verificationRequired) break;
         if (response && candidateStatus < 400 && !loaded.blank) break;
         lastHomepageError = suspended
           ? 'Main website account is suspended.'
@@ -364,6 +374,8 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     }
     if (homepage.suspended) {
       issues.push('Main website account is suspended.');
+    } else if (homepage.verificationRequired) {
+      issues.push('Main website requires a browser verification challenge; navigation checks could not be verified.');
     } else if (((!homepage.statusCode && !homepage.timedOut) || homepage.statusCode >= 400 || homepage.blank) && !paused.has('homepage')) {
       issues.push(lastHomepageError || 'Main website could not be opened successfully.');
     }
@@ -375,13 +387,14 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     if (homepage.loadTimeMs > config.slowPageMs && !paused.has('loadTime')) issues.push(`Main website is slow (${homepage.loadTimeMs} ms).`);
     await reportStep(paused.has('homepage') && paused.has('loadTime') ? 'Homepage paused' : 'Homepage checked');
 
-    const mainNewsPage = paused.has('news') || homepage.suspended ? { exists: false } : await checkMainNewsPage(desktopContext, homepage.finalUrl);
+    const mainNewsPage = paused.has('news') || homepage.suspended || homepage.verificationRequired ? { exists: false } : await checkMainNewsPage(desktopContext, homepage.finalUrl);
     const stepFailure = (label, error) => ({ status: 'error', url: null, statusCode: null, error: `${label} could not be checked: ${String(error?.message || error).split('\n')[0].slice(0, 160)}` });
     const desktopChecks = (async () => {
       try {
-      if (homepage.suspended) {
+      if (homepage.suspended || homepage.verificationRequired) {
         await reportStep('Desktop checks skipped', 2);
-        return [{ status: 'skipped' }, { status: 'skipped' }];
+        const reason = homepage.verificationRequired ? 'Browser verification prevented checking this menu.' : undefined;
+        return [{ status: 'skipped', error: reason }, { status: 'skipped', error: reason }];
       }
       let contact = pausedResult();
       if (!paused.has('contact')) {
@@ -419,9 +432,10 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
         await reportStep('Mobile checks paused', 2, { mobileProgressPercent: 100 });
         return { contact: pausedResult(), news: pausedResult() };
       }
-      if (homepage.suspended || !homepage.statusCode || homepage.statusCode >= 500) {
+      if (homepage.suspended || homepage.verificationRequired || !homepage.statusCode || homepage.statusCode >= 500) {
         await reportStep('Mobile checks skipped', 2, { mobileProgressPercent: 100 });
-        return { contact: { status: 'skipped' }, news: { status: 'skipped' } };
+        const reason = homepage.verificationRequired ? 'Browser verification prevented checking this menu.' : undefined;
+        return { contact: { status: 'skipped', error: reason }, news: { status: 'skipped', error: reason } };
       }
       await reportStep('Mobile homepage loading', 0, { mobileProgressPercent: 10 });
       try {
