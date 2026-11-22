@@ -101,7 +101,7 @@ export function isMobileMenuControlLabel(text) {
   return /^(menu|main menu|menu toggle|main menu toggle|open menu|open main menu|open navigation|open main navigation|show menu|show navigation|toggle menu|toggle navigation|toggle main menu|toggle main navigation|navigation menu|navbar|hamburger|drawer)$/.test(normalized) || /^(মেনু|মেনু খুলুন|নেভিগেশন|নেভিগেশন খুলুন|হ্যামবার্গার মেনু)$/.test(normalized);
 }
 
-async function findLink(page, type, { includeHidden = false } = {}) {
+export async function findLink(page, type, { includeHidden = false } = {}) {
   let fallback = null;
   const selectors = includeHidden ? [...navigationSelectors, ...mobileNavigationSelectors] : navigationSelectors;
   for (const selector of selectors) {
@@ -125,6 +125,7 @@ async function findLink(page, type, { includeHidden = false } = {}) {
           || null,
         kind: element.matches('button, [role="button"]') ? 'button' : 'link'
       }));
+      const href = match.href;
       if (type === 'news' && isIgnoredNewsCategoryPath(href, page.url())) {
         fallback ||= match;
         continue;
@@ -212,9 +213,10 @@ async function findMobileMenuButton(page) {
   return structuralFallback;
 }
 
-export function isMobileMenuOpenState({ expanded, indicatesClose, controlledNavigationVisible }) {
+export function isMobileMenuOpenState({ expanded, indicatesClose, controlledNavigationVisible, toggleChecked }) {
   if (expanded === 'true') return true;
   if (expanded === 'false') return false;
+  if (typeof toggleChecked === 'boolean') return toggleChecked;
   return indicatesClose || controlledNavigationVisible;
 }
 
@@ -239,11 +241,15 @@ async function isMobileMenuOpen(page, button) {
         && rect.bottom > 0
         && rect.top < window.innerHeight;
     });
-    return { expanded, indicatesClose, controlledNavigationVisible };
+    const toggle = element.matches('label[for]')
+      ? document.getElementById(element.htmlFor)
+      : element.querySelector('input[type="checkbox"]');
+    const toggleChecked = toggle?.matches('input[type="checkbox"]') ? toggle.checked : null;
+    return { expanded, indicatesClose, controlledNavigationVisible, toggleChecked };
   }).catch(() => false);
   if (buttonState && typeof buttonState === 'object' && buttonState.expanded === 'false') return false;
   if (buttonState && typeof buttonState === 'object' && isMobileMenuOpenState(buttonState)) return true;
-  return Boolean(await findLink(page, 'contact') || await findLink(page, 'news'));
+  return false;
 }
 
 async function checkMenu(page, context, type, { includeHidden = false, found: suppliedFound } = {}) {
@@ -315,6 +321,17 @@ export function isVerificationChallengePage(title, bodyText) {
   const body = String(bodyText || '');
   return /\bjust a moment\b/i.test(titleText)
     && /\b(?:verify you are human|confirm that you are a human|checking your browser|security verification)\b/i.test(body);
+}
+
+export function getHomepageNavigationSkipReason(homepage) {
+  if (homepage.suspended) return 'Homepage is suspended; navigation checks skipped.';
+  if (homepage.verificationRequired) return 'Browser verification blocked homepage; navigation checks skipped.';
+  if (homepage.timedOut) return 'Homepage timed out; navigation checks skipped.';
+  if (homepage.sslValid === false) return 'Homepage SSL check failed; navigation checks skipped.';
+  if (!homepage.statusCode || homepage.statusCode >= 400 || homepage.blank) {
+    return 'Homepage unavailable; navigation checks skipped.';
+  }
+  return null;
 }
 
 export function getOverallStatus(homepage, issues, { homepagePaused = false } = {}) {
@@ -400,14 +417,17 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     if (homepage.loadTimeMs > config.slowPageMs && !paused.has('loadTime')) issues.push(`Main website is slow (${homepage.loadTimeMs} ms).`);
     await reportStep(paused.has('homepage') && paused.has('loadTime') ? 'Homepage paused' : 'Homepage checked');
 
-    const mainNewsPage = paused.has('news') || homepage.suspended || homepage.verificationRequired ? { exists: false } : await checkMainNewsPage(desktopContext, homepage.finalUrl);
+    const homepageNavigationSkipReason = getHomepageNavigationSkipReason(homepage);
+    const mainNewsPage = paused.has('news') || homepageNavigationSkipReason ? { exists: false } : await checkMainNewsPage(desktopContext, homepage.finalUrl);
     const stepFailure = (label, error) => ({ status: 'error', url: null, statusCode: null, error: `${label} could not be checked: ${String(error?.message || error).split('\n')[0].slice(0, 160)}` });
     const desktopChecks = (async () => {
       try {
-      if (homepage.suspended || homepage.verificationRequired) {
+      if (homepageNavigationSkipReason) {
         await reportStep('Desktop checks skipped', 2);
-        const reason = homepage.verificationRequired ? 'Browser verification prevented checking this menu.' : undefined;
-        return [{ status: 'skipped', error: reason }, { status: 'skipped', error: reason }];
+        return [
+          { status: 'skipped', error: homepageNavigationSkipReason },
+          { status: 'skipped', error: homepageNavigationSkipReason }
+        ];
       }
       let contact = pausedResult();
       if (!paused.has('contact')) {
@@ -429,7 +449,8 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
       }
     })();
     // The mobile browser is only opened when at least one menu check (contact / news) is still active.
-    const needsMobile = !paused.has('contact') || !paused.has('news');
+    const mobileChecksRequested = !paused.has('contact') || !paused.has('news');
+    const needsMobile = mobileChecksRequested && !homepageNavigationSkipReason;
     let mobileContext = null;
     let mobile = null;
     if (needsMobile) {
@@ -441,14 +462,16 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     }
     const mobileChecks = (async () => {
       try {
-      if (!needsMobile) {
+      if (!mobileChecksRequested) {
         await reportStep('Mobile checks paused', 2, { mobileProgressPercent: 100 });
         return { contact: pausedResult(), news: pausedResult() };
       }
-      if (homepage.suspended || homepage.verificationRequired || !homepage.statusCode || homepage.statusCode >= 500) {
+      if (homepageNavigationSkipReason) {
         await reportStep('Mobile checks skipped', 2, { mobileProgressPercent: 100 });
-        const reason = homepage.verificationRequired ? 'Browser verification prevented checking this menu.' : undefined;
-        return { contact: { status: 'skipped', error: reason }, news: { status: 'skipped', error: reason } };
+        return {
+          contact: { status: 'skipped', error: homepageNavigationSkipReason },
+          news: { status: 'skipped', error: homepageNavigationSkipReason }
+        };
       }
       await reportStep('Mobile homepage loading', 0, { mobileProgressPercent: 10 });
       try {

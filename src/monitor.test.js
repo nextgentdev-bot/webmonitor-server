@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, isMobileMenuOpenState, isSuspendedPage, isVerificationChallengePage, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult } from './monitor.js';
+import { findLink, getHomepageNavigationSkipReason, getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, isMobileMenuOpenState, isSuspendedPage, isVerificationChallengePage, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult } from './monitor.js';
 import { countHealthyWebsites, defaultGoogleSheetTab, latestCheckPerWebsite, parseGoogleSheetRows, summarizeWebsiteProgress } from './utils.js';
 
 test('normalizes mixed Bengali and English navigation labels', () => {
@@ -95,6 +95,17 @@ test('recognizes browser verification pages without mistaking ordinary homepages
   assert.equal(isVerificationChallengePage('Just a moment...', 'Welcome to our website.'), false);
 });
 
+test('skips navigation checks for homepage failures but not slow successful homepages', () => {
+  assert.match(getHomepageNavigationSkipReason({ suspended: true }), /suspended/);
+  assert.match(getHomepageNavigationSkipReason({ verificationRequired: true }), /verification/);
+  assert.match(getHomepageNavigationSkipReason({ timedOut: true }), /timed out/);
+  assert.match(getHomepageNavigationSkipReason({ sslValid: false }), /SSL/);
+  assert.match(getHomepageNavigationSkipReason({ statusCode: 503 }), /unavailable/);
+  assert.match(getHomepageNavigationSkipReason({ statusCode: 404 }), /unavailable/);
+  assert.match(getHomepageNavigationSkipReason({ statusCode: 200, blank: true }), /unavailable/);
+  assert.equal(getHomepageNavigationSkipReason({ statusCode: 200, loadTimeMs: 12000, sslValid: true, blank: false }), null);
+});
+
 test('ignores absent News navigation only when the main-domain /news page does not exist', () => {
   assert.equal(resolveNewsCheckResult({ status: 'missing' }, true).status, 'missing');
   assert.equal(resolveNewsCheckResult({ status: 'missing' }, false).status, 'skipped');
@@ -105,6 +116,38 @@ test('ignores absent News navigation only when the main-domain /news page does n
 test('does not treat a redirect to the homepage as an existing News page', () => {
   assert.equal(isMainNewsPath('https://tainiomania.io/', 'https://tainiomania.io/'), false);
   assert.equal(isMainNewsPath('https://tainiomania.io/news', 'https://tainiomania.io/'), true);
+});
+
+test('finds navigation links and buttons using their resolved URL and label', async () => {
+  const makePage = ({ label, href, kind }) => {
+    const element = {
+      getAttribute: (name) => name === 'href' ? href : null,
+      closest: () => null,
+      matches: () => kind === 'button'
+    };
+    const item = {
+      isVisible: async () => true,
+      innerText: async () => label,
+      getAttribute: async () => null,
+      evaluate: async (callback) => callback(element)
+    };
+    return {
+      url: () => 'https://example.com/',
+      locator: (selector) => ({
+        count: async () => selector.startsWith('nav a[href]') ? 1 : 0,
+        nth: () => item
+      })
+    };
+  };
+
+  assert.deepEqual(await findLink(makePage({ label: 'Noticias', href: '/noticias', kind: 'link' }), 'news'), {
+    href: '/noticias',
+    kind: 'link'
+  });
+  assert.deepEqual(await findLink(makePage({ label: 'Contacta con nosotras', href: null, kind: 'button' }), 'contact'), {
+    href: null,
+    kind: 'button'
+  });
 });
 
 test('recognizes English and Bengali mobile menu controls', () => {
@@ -120,6 +163,8 @@ test('does not mistake a closed mobile menu for an open one', () => {
   assert.equal(isMobileMenuOpenState({ expanded: 'false', indicatesClose: false, controlledNavigationVisible: false }), false);
   assert.equal(isMobileMenuOpenState({ expanded: 'false', indicatesClose: false, controlledNavigationVisible: true }), false);
   assert.equal(isMobileMenuOpenState({ expanded: 'true', indicatesClose: false, controlledNavigationVisible: false }), true);
+  assert.equal(isMobileMenuOpenState({ toggleChecked: false, indicatesClose: false, controlledNavigationVisible: false }), false);
+  assert.equal(isMobileMenuOpenState({ toggleChecked: true, indicatesClose: false, controlledNavigationVisible: false }), true);
   assert.equal(isMobileMenuOpenState({ indicatesClose: false, controlledNavigationVisible: true }), true);
 });
 
