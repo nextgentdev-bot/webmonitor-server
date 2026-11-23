@@ -65,12 +65,22 @@ function matchesAnyPhrase(text, phrases) {
   return phrases.some((phrase) => text === phrase || text.startsWith(`${phrase} `) || text.endsWith(` ${phrase}`) || text.includes(` ${phrase} `));
 }
 
+// example.com and www.example.com are the same website, so a menu link to one of them from a page on the other is still "same site".
+export function isSameSite(a, b) {
+  try {
+    const hostOf = (value) => new URL(value).hostname.toLowerCase().replace(/^www\./, '');
+    return hostOf(a) === hostOf(b);
+  } catch {
+    return false;
+  }
+}
+
 export function isMainNewsPath(href, baseUrl) {
   try {
     const newsUrl = new URL(href, baseUrl);
     const siteUrl = new URL(baseUrl);
     const pathname = decodeURIComponent(newsUrl.pathname);
-    return newsUrl.origin === siteUrl.origin && /^\/(?:news|not[ií]cias|actualit[eé]s|nouvelles|nachrichten|notizie|nieuws|wiadomo[sś]ci|новости|новини|أخبار|اخبار|ニュース|新闻|新聞|뉴스|haberler|berita|tin tức|समाचार|খবর|সংবাদ|nyheter|nyheder|uutiset|ειδήσεις|ข่าว|balita)\/?$/iu.test(pathname);
+    return isSameSite(newsUrl.href, siteUrl.href) && /^\/(?:news|not[ií]cias|actualit[eé]s|nouvelles|nachrichten|notizie|nieuws|wiadomo[sś]ci|новости|новини|أخبار|اخبار|ニュース|新闻|新聞|뉴스|haberler|berita|tin tức|समाचार|খবর|সংবাদ|nyheter|nyheder|uutiset|ειδήσεις|ข่าว|balita)\/?$/iu.test(pathname);
   } catch {
     return false;
   }
@@ -80,7 +90,7 @@ export function isIgnoredNewsCategoryPath(href, baseUrl) {
   try {
     const targetUrl = new URL(href, baseUrl);
     const siteUrl = new URL(baseUrl);
-    return targetUrl.origin === siteUrl.origin && /(?:^|\/)category\/news\/?$/i.test(decodeURIComponent(targetUrl.pathname));
+    return isSameSite(targetUrl.href, siteUrl.href) && /(?:^|\/)category\/news\/?$/i.test(decodeURIComponent(targetUrl.pathname));
   } catch {
     return false;
   }
@@ -138,7 +148,57 @@ export async function findLink(page, type, { includeHidden = false } = {}) {
   return fallback;
 }
 
-async function findMenuLink(page, type, { includeHidden = false } = {}) {
+// Many themes build or reveal their menu with JavaScript after DOMContentLoaded. Wait (best effort, never fails the check) until the page has settled and has real links.
+export async function waitForMenuReady(page, { maxMs = 8000 } = {}) {
+  const deadline = Date.now() + maxMs;
+  const left = () => Math.max(500, deadline - Date.now());
+  await page.waitForLoadState('load', { timeout: left() }).catch(() => {});
+  await page.waitForFunction(() => document.querySelectorAll('a[href]').length >= 3, null, { timeout: left() }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: Math.min(3000, left()) }).catch(() => {});
+}
+
+// Last resort: look at every link of the page, not only the ones inside nav/header/menu containers.
+// The label must be short (a real menu item, not a sentence of an article), so "How to contact us for a refund" is not mistaken for a Contact link.
+async function findLinkAnywhere(page, type, { includeHidden = false } = {}) {
+  const anchors = page.locator('a[href]');
+  const total = Math.min(await anchors.count().catch(() => 0), 1500);
+  let fallback = null;
+  for (let index = 0; index < total; index += 1) {
+    const link = anchors.nth(index);
+    if (!includeHidden && !await link.isVisible().catch(() => false)) continue;
+    const raw = await link.evaluate((element) => ({
+      text: [element.textContent, element.getAttribute('aria-label'), element.getAttribute('title')].filter(Boolean).join(' '),
+      href: element.getAttribute('href')
+    })).catch(() => null);
+    if (!raw || normalizeMenuLabel(raw.text).split(' ').filter(Boolean).length > 4) continue;
+    if (!matchesMenuLabel(raw.text, type)) continue;
+    const match = { href: raw.href, kind: 'link' };
+    if (type !== 'news') return match;
+    if (isIgnoredNewsCategoryPath(raw.href, page.url())) { fallback ||= match; continue; }
+    if (isMainNewsPath(raw.href, page.url())) return match;
+    fallback ||= match;
+  }
+  return fallback;
+}
+
+// Facts that explain a "Missing" result (what the browser really saw), saved with the check and printed in the worker log.
+export async function collectMenuDiagnostics(page) {
+  return page.evaluate(() => {
+    const links = [...document.querySelectorAll('a[href]')];
+    return {
+      title: document.title,
+      url: location.href,
+      userAgent: navigator.userAgent,
+      bodyTextLength: (document.body?.innerText || '').trim().length,
+      linkCount: links.length,
+      visibleLinkCount: links.filter((a) => a.getClientRects().length).length,
+      navCount: document.querySelectorAll('nav, [role="navigation"], header').length,
+      sampleLinks: links.slice(0, 25).map((a) => (a.textContent || a.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ').slice(0, 30)).filter(Boolean)
+    };
+  }).catch(() => null);
+}
+
+async function findMenuLinkOnce(page, type, { includeHidden = false } = {}) {
   const options = { includeHidden };
   let found = await findLink(page, type, options);
   const controls = page.locator(dropdownControlSelectors);
@@ -172,7 +232,16 @@ async function findMenuLink(page, type, { includeHidden = false } = {}) {
     const menuLink = await findLink(page, type, options);
     if (menuLink) found ||= menuLink;
   }
-  return found;
+  return found || await findLinkAnywhere(page, type, options);
+}
+
+// If nothing is found the first time, give a late (JavaScript) menu one more chance before calling it "missing".
+async function findMenuLink(page, type, { includeHidden = false } = {}) {
+  const first = await findMenuLinkOnce(page, type, { includeHidden });
+  if (first) return first;
+  await waitForMenuReady(page, { maxMs: 4000 });
+  await page.waitForTimeout(1500);
+  return findMenuLinkOnce(page, type, { includeHidden });
 }
 
 async function findNewsLink(page, { includeHidden = false } = {}) {
@@ -289,6 +358,43 @@ async function checkMainNewsPage(context, homepageUrl) {
   }
 }
 
+// The contact page of a website lives at maindomain/contact or maindomain/contact-us. Contact is required: if neither exists and the menu has no Contact item, it is reported.
+export const CONTACT_PAGE_PATHS = ['/contact', '/contact-us'];
+
+export function isContactPagePath(resolvedUrl) {
+  try {
+    return /contact/i.test(decodeURIComponent(new URL(resolvedUrl).pathname));
+  } catch {
+    return false;
+  }
+}
+
+async function checkMainContactPage(context, homepageUrl) {
+  for (const path of CONTACT_PAGE_PATHS) {
+    try {
+      const contactUrl = new URL(path, homepageUrl).toString();
+      const response = await context.request.get(contactUrl, { timeout: config.navigationTimeoutMs, failOnStatusCode: false });
+      // A redirect to the homepage or a soft 404 does not count: the page we land on must still be a contact page.
+      if (response.status() >= 200 && response.status() < 400 && isContactPagePath(response.url())) {
+        return { exists: true, url: response.url(), statusCode: response.status(), error: null };
+      }
+    } catch (error) {
+      console.warn(`Unable to verify the ${path} page at ${homepageUrl}:`, error.message);
+    }
+  }
+  return { exists: false, url: null, statusCode: null, error: null };
+}
+
+// Contact is required on every website (unlike News, it is never skipped). A missing Contact menu item is always an issue;
+// the message says whether the contact page itself (maindomain/contact or /contact-us) was found, so the cause is clear.
+export function resolveContactCheckResult(result, mainContactPageExists) {
+  if (result.status !== 'missing') return result;
+  const reason = mainContactPageExists
+    ? 'Contact page exists but no Contact item was found in the menu.'
+    : 'Contact page not found (/contact or /contact-us) and no Contact item in the menu.';
+  return { ...result, error: result.error || reason };
+}
+
 export function getHomepageCandidates(url) {
   const candidates = new Set();
   const trimmed = String(url || '').trim();
@@ -368,7 +474,8 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
   signal?.addEventListener('abort', closeContexts, { once: true });
   // Browser contexts are always closed in `finally`, even when the check fails half way, so failed checks cannot pile up memory in the worker.
   try {
-    const desktopContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const chromeVersion = typeof browser.version === 'function' ? browser.version() : '124.0.0.0';
+    const desktopContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'en-US', userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36` });
     contexts.push(desktopContext);
     if (signal?.aborted) closeContexts();
     const desktop = await desktopContext.newPage();
@@ -418,6 +525,8 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     await reportStep(paused.has('homepage') && paused.has('loadTime') ? 'Homepage paused' : 'Homepage checked');
 
     const homepageNavigationSkipReason = getHomepageNavigationSkipReason(homepage);
+    // Order of the checks: (1) does maindomain/contact(-us) exist (Contact is required), (2) does maindomain/news exist (News is skipped when it does not), (3) then look for the menu items on desktop and mobile.
+    const mainContactPage = paused.has('contact') || homepageNavigationSkipReason ? { exists: false } : await checkMainContactPage(desktopContext, homepage.finalUrl);
     const mainNewsPage = paused.has('news') || homepageNavigationSkipReason ? { exists: false } : await checkMainNewsPage(desktopContext, homepage.finalUrl);
     const stepFailure = (label, error) => ({ status: 'error', url: null, statusCode: null, error: `${label} could not be checked: ${String(error?.message || error).split('\n')[0].slice(0, 160)}` });
     const desktopChecks = (async () => {
@@ -429,6 +538,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
           { status: 'skipped', error: homepageNavigationSkipReason }
         ];
       }
+      await waitForMenuReady(desktop);
       let contact = pausedResult();
       if (!paused.has('contact')) {
         const contactFound = await findContactLink(desktop);
@@ -454,7 +564,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     let mobileContext = null;
     let mobile = null;
     if (needsMobile) {
-      mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+      mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: 'en-US', userAgent: `Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Mobile Safari/537.36` });
       contexts.push(mobileContext);
       if (signal?.aborted) closeContexts();
       mobile = await mobileContext.newPage();
@@ -482,6 +592,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
         const result = { status: 'error', url: mobile.url() || website.url, statusCode: null, error: `Mobile homepage could not be opened: ${error.message}` };
         return { contact: result, news: result };
       }
+      await waitForMenuReady(mobile);
       await reportStep('Mobile menu ready', 0, { mobileProgressPercent: 35 });
       const menuButton = await findMobileMenuButton(mobile);
       let menuOpenError = null;
@@ -520,9 +631,16 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     if (signal?.aborted) throw signal.reason || new Error('Run cancelled.');
     // A paused check is always reported as "paused", whatever happened to the page while the other checks ran.
     const withPause = (key, result) => paused.has(key) ? pausedResult() : result;
-    const desktopContactResult = withPause('contact', desktopContact);
+    const diagnostics = {};
+    const missingNow = (r) => r && r.status === 'missing';
+    const contactOf = (result) => resolveContactCheckResult(result, mainContactPage.exists);
+    const newsOf = (result) => resolveNewsCheckResult(result, mainNewsPage.exists);
+    if ([contactOf(desktopContact), newsOf(desktopNews)].some(missingNow)) diagnostics.desktop = await collectMenuDiagnostics(desktop);
+    if (mobile && [contactOf(mobileResult.contact), newsOf(mobileResult.news)].some(missingNow)) diagnostics.mobile = await collectMenuDiagnostics(mobile);
+    if (diagnostics.desktop || diagnostics.mobile) console.log(`Menu not found on ${website.url}:`, JSON.stringify(diagnostics));
+    const desktopContactResult = withPause('contact', resolveContactCheckResult(desktopContact, mainContactPage.exists));
     const desktopNewsResult = withPause('news', resolveNewsCheckResult(desktopNews, mainNewsPage.exists));
-    const mobileContactResult = withPause('contact', mobileResult.contact);
+    const mobileContactResult = withPause('contact', resolveContactCheckResult(mobileResult.contact, mainContactPage.exists));
     const mobileNewsResult = withPause('news', resolveNewsCheckResult(mobileResult.news, mainNewsPage.exists));
     const desktopResult = { contact: desktopContactResult, news: desktopNewsResult };
     const finalMobileResult = { contact: mobileContactResult, news: mobileNewsResult };
@@ -534,7 +652,7 @@ export async function monitorWebsite(browser, { website, runId, onProgress = asy
     }
 
     const status = getOverallStatus(homepage, issues, { homepagePaused: paused.has('homepage') });
-    return { overallStatus: status, homepage, desktop: desktopResult, mobile: finalMobileResult, issues, screenshots: [], pausedChecks: [...paused] };
+    return { overallStatus: status, homepage, desktop: desktopResult, mobile: finalMobileResult, issues, screenshots: [], pausedChecks: [...paused], ...(Object.keys(diagnostics).length ? { diagnostics } : {}) };
   } finally {
     signal?.removeEventListener('abort', closeContexts);
     await Promise.allSettled(contexts.map((context) => context.close()));

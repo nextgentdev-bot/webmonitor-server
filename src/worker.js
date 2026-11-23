@@ -68,7 +68,7 @@ async function loop(browser, slot) {
 }
 async function main() {
 	await connectDatabase();
-	const browser = await chromium.launch({ headless: true, args: ['--disable-dev-shm-usage', '--no-sandbox'] });
+	const browser = await chromium.launch({ headless: true, args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-blink-features=AutomationControlled'] });
 	await updateWorkerHeartbeat('online');
 	console.log(`Worker online (${config.workerConcurrency} slots).`);
 	const heartbeat = setInterval(() => {

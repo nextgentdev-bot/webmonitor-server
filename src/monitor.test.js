@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { findLink, getHomepageNavigationSkipReason, getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, isMobileMenuOpenState, isSuspendedPage, isVerificationChallengePage, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult } from './monitor.js';
+import { findLink, getHomepageNavigationSkipReason, getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, isMobileMenuOpenState, isSuspendedPage, isVerificationChallengePage, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult, isSameSite, isContactPagePath, resolveContactCheckResult } from './monitor.js';
 import { countHealthyWebsites, defaultGoogleSheetTab, latestCheckPerWebsite, parseGoogleSheetRows, summarizeWebsiteProgress } from './utils.js';
 
 test('normalizes mixed Bengali and English navigation labels', () => {
@@ -270,4 +270,29 @@ test('counts a re-checked website once and prefers its open check', () => {
   assert.equal(result.length, 2);
   assert.equal(result.find((check) => check.website === 'a').status, 'pending');
   assert.equal(result.find((check) => check.website === 'b')._id, '4');
+});
+
+test('treats www and non-www as the same website for the News rules', () => {
+  assert.equal(isSameSite('https://guicloud.in/news', 'https://www.guicloud.in/'), true);
+  assert.equal(isSameSite('https://other.com/news', 'https://www.guicloud.in/'), false);
+  // https://domain/news is a main news page (checked); /category/news is ignored (skipped), with or without www on either side.
+  assert.equal(isMainNewsPath('https://guicloud.in/news', 'https://www.guicloud.in/'), true);
+  assert.equal(isMainNewsPath('https://www.guicloud.in/news/', 'https://guicloud.in/'), true);
+  assert.equal(isIgnoredNewsCategoryPath('https://guicloud.in/category/news/', 'https://www.guicloud.in/'), true);
+  assert.equal(isIgnoredNewsCategoryPath('/category/news', 'https://guicloud.in/'), true);
+  assert.equal(isIgnoredNewsCategoryPath('/news', 'https://guicloud.in/'), false);
+});
+
+test('contact is required: a missing Contact menu item is always an issue, with the reason', () => {
+  assert.equal(isContactPagePath('https://guicloud.in/contact-us/'), true);
+  assert.equal(isContactPagePath('https://guicloud.in/contact'), true);
+  assert.equal(isContactPagePath('https://guicloud.in/'), false);
+  const withPage = resolveContactCheckResult({ status: 'missing' }, true);
+  assert.equal(withPage.status, 'missing');
+  assert.match(withPage.error, /page exists/i);
+  const noPage = resolveContactCheckResult({ status: 'missing' }, false);
+  assert.equal(noPage.status, 'missing');
+  assert.match(noPage.error, /not found \(\/contact or \/contact-us\)/i);
+  assert.equal(resolveContactCheckResult({ status: 'missing', error: 'Mobile menu could not be opened: x' }, false).error, 'Mobile menu could not be opened: x');
+  assert.deepEqual(resolveContactCheckResult({ status: 'working', url: 'x' }, false), { status: 'working', url: 'x' });
 });
