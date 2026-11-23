@@ -126,15 +126,18 @@ export async function findLink(page, type, { includeHidden = false } = {}) {
       }
       const label = await textOf(link);
       if (!matchesMenuLabel(label, type)) continue;
-      const match = await link.evaluate((element) => ({
+      const { inFooter, ...match } = await link.evaluate((element) => ({
         href: element.getAttribute('href')
           || element.getAttribute('data-href')
           || element.getAttribute('data-url')
           || element.getAttribute('formaction')
           || element.closest('a[href]')?.getAttribute('href')
           || null,
-        kind: element.matches('button, [role="button"]') ? 'button' : 'link'
+        kind: element.matches('button, [role="button"]') ? 'button' : 'link',
+        inFooter: Boolean(element.closest('footer'))
       }));
+      // A link in the page footer is not part of the navigation menu.
+      if (inFooter) continue;
       const href = match.href;
       if (type === 'news' && isIgnoredNewsCategoryPath(href, page.url())) {
         fallback ||= match;
@@ -146,6 +149,51 @@ export async function findLink(page, type, { includeHidden = false } = {}) {
     }
   }
   return fallback;
+}
+
+// ---- URL based menu detection (works in every language) ----
+// A site's menu text depends on its language ("News", "Notizie", "ニュース", ...), but the addresses are the same:
+// News -> maindomain/news, Contact -> maindomain/contact or maindomain/contact-us. So the menu is searched by address first, and by label only as a backup.
+export function isContactMenuPath(href, baseUrl) {
+  try {
+    const target = new URL(href, baseUrl);
+    return isSameSite(target.href, baseUrl) && /^\/(?:contact|contact-us)\/?$/i.test(decodeURIComponent(target.pathname));
+  } catch {
+    return false;
+  }
+}
+
+// 'match' = the menu address we are looking for, 'ignored' = a News category link that must be skipped, null = not related.
+export function classifyMenuHref(type, href, baseUrl) {
+  if (!href) return null;
+  if (type === 'contact') return isContactMenuPath(href, baseUrl) ? 'match' : null;
+  if (type === 'news') {
+    if (isIgnoredNewsCategoryPath(href, baseUrl)) return 'ignored';
+    if (isMainNewsPath(href, baseUrl)) return 'match';
+  }
+  return null;
+}
+
+// Reads every link of the page in one go (visible or hidden, so dropdowns, "More" boxes and mobile menus are included).
+// Links inside the footer do not count as navigation. Links inside a navigation area are preferred.
+export async function findLinkByUrl(page, type) {
+  const baseUrl = page.url();
+  const anchors = await page.evaluate(() => [...document.querySelectorAll('a[href]')].slice(0, 3000).map((anchor) => ({
+    href: anchor.getAttribute('href'),
+    inNav: Boolean(anchor.closest('nav, [role="navigation"], header, [class*="menu" i], [id*="menu" i], [class*="nav" i], [id*="nav" i], [class*="offcanvas" i], [class*="drawer" i]')),
+    inFooter: Boolean(anchor.closest('footer'))
+  }))).catch(() => []);
+  let anywhere = null;
+  let ignored = null;
+  for (const anchor of anchors) {
+    const kind = classifyMenuHref(type, anchor.href, baseUrl);
+    if (!kind || anchor.inFooter) continue;
+    const candidate = { href: anchor.href, kind: 'link' };
+    if (kind === 'ignored') { ignored ||= candidate; continue; }
+    if (anchor.inNav) return candidate;
+    anywhere ||= candidate;
+  }
+  return anywhere || ignored;
 }
 
 // Many themes build or reveal their menu with JavaScript after DOMContentLoaded. Wait (best effort, never fails the check) until the page has settled and has real links.
@@ -168,9 +216,10 @@ async function findLinkAnywhere(page, type, { includeHidden = false } = {}) {
     if (!includeHidden && !await link.isVisible().catch(() => false)) continue;
     const raw = await link.evaluate((element) => ({
       text: [element.textContent, element.getAttribute('aria-label'), element.getAttribute('title')].filter(Boolean).join(' '),
-      href: element.getAttribute('href')
+      href: element.getAttribute('href'),
+      inFooter: Boolean(element.closest('footer'))
     })).catch(() => null);
-    if (!raw || normalizeMenuLabel(raw.text).split(' ').filter(Boolean).length > 4) continue;
+    if (!raw || raw.inFooter || normalizeMenuLabel(raw.text).split(' ').filter(Boolean).length > 4) continue;
     if (!matchesMenuLabel(raw.text, type)) continue;
     const match = { href: raw.href, kind: 'link' };
     if (type !== 'news') return match;
@@ -200,6 +249,9 @@ export async function collectMenuDiagnostics(page) {
 
 async function findMenuLinkOnce(page, type, { includeHidden = false } = {}) {
   const options = { includeHidden };
+  // 1) By address (language independent). A News category link is remembered but does not stop the search for a real /news link.
+  const byUrl = await findLinkByUrl(page, type);
+  if (byUrl && classifyMenuHref(type, byUrl.href, page.url()) === 'match') return byUrl;
   let found = await findLink(page, type, options);
   const controls = page.locator(dropdownControlSelectors);
   for (let index = 0; index < Math.min(await controls.count(), 100); index += 1) {
@@ -232,7 +284,7 @@ async function findMenuLinkOnce(page, type, { includeHidden = false } = {}) {
     const menuLink = await findLink(page, type, options);
     if (menuLink) found ||= menuLink;
   }
-  return found || await findLinkAnywhere(page, type, options);
+  return found || byUrl || await findLinkAnywhere(page, type, options);
 }
 
 // If nothing is found the first time, give a late (JavaScript) menu one more chance before calling it "missing".

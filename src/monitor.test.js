@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { findLink, getHomepageNavigationSkipReason, getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, isMobileMenuOpenState, isSuspendedPage, isVerificationChallengePage, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult, isSameSite, isContactPagePath, resolveContactCheckResult } from './monitor.js';
+import { findLink, getHomepageNavigationSkipReason, getOverallStatus, isIgnoredNewsCategoryPath, isMainNewsPath, isMobileMenuControlLabel, isMobileMenuOpenState, isSuspendedPage, isVerificationChallengePage, matchesMenuLabel, normalizeMenuLabel, resolveNewsCheckResult, isSameSite, isContactPagePath, resolveContactCheckResult, classifyMenuHref, isContactMenuPath } from './monitor.js';
 import { countHealthyWebsites, defaultGoogleSheetTab, latestCheckPerWebsite, parseGoogleSheetRows, summarizeWebsiteProgress } from './utils.js';
 
 test('normalizes mixed Bengali and English navigation labels', () => {
@@ -295,4 +295,19 @@ test('contact is required: a missing Contact menu item is always an issue, with 
   assert.match(noPage.error, /not found \(\/contact or \/contact-us\)/i);
   assert.equal(resolveContactCheckResult({ status: 'missing', error: 'Mobile menu could not be opened: x' }, false).error, 'Mobile menu could not be opened: x');
   assert.deepEqual(resolveContactCheckResult({ status: 'working', url: 'x' }, false), { status: 'working', url: 'x' });
+});
+
+test('finds menu items by address, so the language of the label does not matter', () => {
+  const base = 'https://www.example.it/';
+  assert.equal(classifyMenuHref('news', '/news/', base), 'match');
+  assert.equal(classifyMenuHref('news', 'https://example.it/news', base), 'match');
+  assert.equal(classifyMenuHref('news', '/category/news/', base), 'ignored');
+  assert.equal(classifyMenuHref('news', '/notizie/', base), 'match');
+  assert.equal(classifyMenuHref('news', '/blog/', base), null);
+  assert.equal(classifyMenuHref('news', 'https://other.com/news', base), null);
+  assert.equal(classifyMenuHref('contact', '/contact', base), 'match');
+  assert.equal(classifyMenuHref('contact', '/contact-us/', base), 'match');
+  assert.equal(classifyMenuHref('contact', '/contact-us/form', base), null);
+  assert.equal(classifyMenuHref('contact', '', base), null);
+  assert.equal(isContactMenuPath('https://example.it/contact-us', base), true);
 });
