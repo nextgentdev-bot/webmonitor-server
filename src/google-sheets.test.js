@@ -49,6 +49,8 @@ test('builds a Google OAuth URL with the registered redirect URI and private she
     assert.equal(authorization.searchParams.get('state'), 'signed-state');
     assert.match(authorization.searchParams.get('scope'), /spreadsheets/);
     assert.match(authorization.searchParams.get('scope'), /drive\.file/);
+    assert.match(authorization.searchParams.get('scope'), /analytics\.readonly/);
+    assert.match(authorization.searchParams.get('scope'), /webmasters\.readonly/);
   } finally {
     config.googleOAuthClientId = previousId;
     config.googleOAuthClientSecret = previousSecret;

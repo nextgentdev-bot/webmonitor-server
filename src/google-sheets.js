@@ -267,8 +267,9 @@ export function createGoogleAuthorizationUrl(state, redirectUri = config.googleO
   url.searchParams.set('client_id', config.googleOAuthClientId);
   url.searchParams.set('redirect_uri', redirectUri);
   url.searchParams.set('response_type', 'code');
-  url.searchParams.set('scope', 'openid email https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file');
+  url.searchParams.set('scope', 'openid email https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/analytics.readonly https://www.googleapis.com/auth/webmasters.readonly');
   url.searchParams.set('access_type', 'offline');
+  url.searchParams.set('include_granted_scopes', 'true');
   url.searchParams.set('prompt', 'consent');
   url.searchParams.set('state', state);
   return url.toString();
@@ -309,32 +310,32 @@ export async function exchangeGoogleAuthorizationCode(code, redirectUri = config
 export async function googleSheetsStatus() {
   const values = await readSettings();
   let connected = Boolean(values.refreshToken && values.email);
+  let connectionError = null;
   if (connected) {
     try {
       await accessToken(decryptSecret(values.refreshToken));
     } catch (error) {
-      if (error.code !== 'GOOGLE_AUTH_REVOKED') throw error;
-      return {
-        configured: googleSheetsConfigured(),
-        connected: false,
-        email: null,
-        spreadsheetUrl: null,
-        pending: 0,
-        lastSyncError: null,
-        lastSyncAt: null
-      };
+      connected = false;
+      connectionError = error.message;
     }
   }
   return {
     configured: googleSheetsConfigured(),
     connected,
-    email: values.email || null,
+    email: connected ? values.email : null,
     spreadsheetUrl: values.spreadsheetUrl || null,
     // Results that are saved in the monitor but not yet written to the sheet.
     pending: connected && values.spreadsheetId ? await pendingSheetRowCount() : 0,
     lastSyncError: values.lastSyncError || null,
-    lastSyncAt: values.lastSyncAt || null
+    lastSyncAt: values.lastSyncAt || null,
+    connectionError
   };
+}
+
+export async function connectedGoogleAccessToken() {
+  const values = await readSettings();
+  if (!values.refreshToken) throw new Error('Connect a Google account before checking traffic.');
+  return accessToken(decryptSecret(values.refreshToken));
 }
 
 async function disconnectRevokedGoogleAccount() {

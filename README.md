@@ -37,40 +37,51 @@ Each results sheet keeps a separate tab for each day, named `YYYY-MM-DD` in the 
 
 After making a new or existing sheet active, the dashboard defaults to updating that current sheet on subsequent submissions. Selecting **Create a new sheet** explicitly switches sync to a separate spreadsheet.
 
+## Google Analytics 4 and Search Console traffic reports
+
+Traffic Check reads both sources through the Google account already connected for Sheets; no separate service-account key or new environment variable is needed.
+
+1. In the same Google Cloud project as the OAuth client, enable **Google Analytics Admin API**, **Google Analytics Data API**, and **Google Search Console API**. Keep the Google Sheets API enabled if you also use the results-sheet feature.
+2. In Google Auth Platform, add the read-only scopes `https://www.googleapis.com/auth/analytics.readonly` and `https://www.googleapis.com/auth/webmasters.readonly` to the app's Data Access configuration. Existing users must reconnect from **Traffic Check → Update Google permissions** to grant the expanded access. If the OAuth app is in Testing, add the connecting Google account as a test user. Google may expire refresh tokens for external apps left in Testing after seven days; for continuous use, publish the consent screen to Production and complete any verification Google requires.
+3. Give that Google account access to the relevant GA4 properties (Viewer or higher) and Search Console properties (Full user or Owner).
+4. Open **Traffic Check** and let it discover properties. The dashboard automatically links exact website/property matches; choose the correct GA4 property and Search Console property from the per-website selectors when needed.
+5. Select **Run both checks**. The report shows GA4 sessions, users, new users and page views, plus Search Console clicks, impressions, CTR and average position. It covers the latest 28 complete days and ends three days before the current date to reduce Search Console reporting delays.
+
+Traffic runs are queued and processed independently of Site Check and Domain & Hosting. Keep the persistent worker running for them to complete; a run can be cancelled from the Traffic Check page. A site with only one property mapped still gets that source's report, while the other source displays its own mapping or API error.
+
 ## Important runtime limitation
 
-Vercel functions are short-lived and do not run the persistent Playwright worker or the in-process daily scheduler. The API can accept a run and store checks in MongoDB, but the checks will remain queued until `npm run worker` is running on a separate persistent Node host. Run the worker on a service such as Render, Fly.io, Railway, or a VM, with the same MongoDB URI and compatible monitoring settings. The daily scheduler must also run as a single persistent service or an external scheduled job. Do not deploy multiple scheduler copies.
+Vercel functions are short-lived and do not run the persistent Playwright worker. The API can accept a run and store checks in MongoDB, but the checks will remain queued until `npm run worker` is running on a separate persistent Node host. Run the worker on a service such as Render, Fly.io, Railway, or a VM, with the same MongoDB URI and compatible monitoring settings. If automatic daily checks are enabled in the future, their scheduler must run as a single persistent service or an external scheduled job. Do not deploy multiple scheduler copies.
 
 Issue screenshot capture is disabled; monitoring results are stored without screenshot files.
 
 ## Local development
 
-From the project root, start the client, API, and Playwright worker together with one command:
+Run the client, API server, and worker in three separate terminals. The client always proxies API requests to `http://localhost:4000`; it does not start or connect to a live API.
 
 ```powershell
 cd client
 npm run dev
 ```
 
-This starts Vite, the API server, and the monitoring worker in the same terminal. Keep it open while using the dashboard; press Ctrl+C to stop all three. Saving the server's `.env` file automatically restarts the API and worker to load the updated settings; Vite stays running. Quote `.env` values containing `#` (for example, `ADMIN_PASSWORD="your-value"`), because an unquoted `#` starts a comment.
-The dev launcher waits for the API to connect to MongoDB and become ready before starting Vite, avoiding initial proxy connection errors.
-
-To start services separately, use three terminals:
-
 ```powershell
-cd client
-npm run server
+cd server
+npm run dev
 ```
 
 ```powershell
-cd client
+cd server
 npm run worker
 ```
 
-The client is available at `http://localhost:5173`. Keep the API and worker terminals running while monitoring sites.
+Run the worker command from the `server` directory in the third terminal. Keep all three terminals running while using the dashboard; press Ctrl+C in each to stop its process. The client is available at `http://localhost:5173`. The server and worker load `server/.env`; for fully local data, set `MONGODB_URI=mongodb://127.0.0.1:27017/web_monitor` and have local MongoDB running. Quote `.env` values containing `#` (for example, `ADMIN_PASSWORD="your-value"`), because an unquoted `#` starts a comment.
 The dashboard shows whether the worker heartbeat is online. The worker logs each website as it starts and finishes a check, retries checks left processing by a stopped worker, and reports mobile navigation errors separately.
 
 The worker checks both the homepage and the contact/news items in desktop and mobile navigation, opening dropdown menus to find hidden links. It recognizes anchors and buttons in navigation areas, including buttons without a URL, and common contact/news labels in multiple languages, including Portuguese, Spanish, French, Arabic, Japanese, Chinese, Greek, and Bengali. It tries both HTTP and HTTPS homepage variants when the site is reachable over either scheme. Slow successful homepages still get desktop/mobile navigation checks; other homepage failures (including timeout, suspension, verification challenge, HTTP errors, blank content, and SSL failure) skip those checks so they are not reported as missing. Browser verification challenges are reported separately. News links pointing to `/category/news/` are ignored without requesting or validating that category page. A missing News navigation issue is reported only when the same-domain `/news` page exists but no News item is found in that navigation. Contact links are checked the same way, including dropdown and mobile menu cases.
+
+The **Domain & Hosting** dashboard tab runs domain lookups through the persistent worker. It uses public RDAP, DNS, IP-network, and TLS data to show registration dates/registrar, expiry, nameservers, DNS records, visible network/provider and country, and SSL certificate dates. The provider and country describe the publicly resolved network and may show a CDN edge rather than the origin host; registration details may be hidden or unavailable for some domain endings. Domain checks are queued separately from website checks. From the Domain & Hosting tab, run a lookup for one site from its action menu, for all sites, or for marked sites. A running domain run can be cancelled from its progress panel; queued lookups stop, and in-progress lookups do not save their result. Marked sites also have bulk pause/resume and delete controls; these manage the websites themselves and do not start Site Checks. The per-site action menu also provides website actions such as opening the site, copying its URL, pausing/resuming monitoring, and deleting it. A domain lookup never starts a Site Check. The latest domain result is also shown in each website's Site Check details. Keep the persistent worker running for these checks to complete.
+
+The dashboard offers separate Site Check and Domain & Hosting actions. Automatic daily checks are disabled; start either check manually from its own tab. Site Checks cover active websites; Domain & Hosting checks cover the full inventory, including paused websites. Their results are stored and updated independently. If a matching run is already in progress, existing work is reused rather than duplicated.
 
 Contact and News order of checks: after the homepage is healthy, the worker first checks whether `maindomain/contact` or `maindomain/contact-us` exists, then whether `maindomain/news` exists, then looks for the items in the desktop and mobile navbar. Menu items are found **by address, not by text**, so the language of the site does not matter: a link to `maindomain/news` is the News item, and a link to `maindomain/contact` or `maindomain/contact-us` is the Contact item (visible or hidden in a dropdown, "More" box or mobile menu; footer links do not count). The multilingual label match is only a backup for menus whose address is different. Contact is required: a missing Contact menu item is always reported, and the issue says whether the contact page exists. News is different: it is required in the navbar only when `maindomain/news` exists, and the check is skipped when that page does not exist. A News menu item that points to `maindomain/category/news` is skipped without being requested.
 

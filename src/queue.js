@@ -3,16 +3,15 @@ import { Check, Run, Website } from './models.js';
 import { config } from './config.js';
 import { pausedKeySet, planLastCheckUpdate } from './check-options.js';
 
-export async function enqueueRun({ type = 'manual', websiteIds = null, localRunDate = null } = {}) {
+export async function enqueueRun({ websiteIds = null } = {}) {
 	const filter = { active: true, ...(websiteIds?.length ? { _id: { $in: websiteIds } } : {}) };
 	const websites = await Website.find(filter).limit(config.maxWebsites).lean();
-	if (!websites.length) return { created: false, reason: websiteIds?.length ? 'No selected websites are available to check.' : 'No active websites are available.' };
-	if (type === 'daily' && await Run.exists({ status: 'running', type: 'daily' })) return { created: false, reason: 'A daily monitoring run is already in progress.' };
+	if (!websites.length) return { created: false, empty: !websiteIds?.length, reason: websiteIds?.length ? 'No selected websites are available to check.' : 'No active websites are available.' };
 
 	const runningRuns = await Run.find({ status: 'running' }).select('_id').sort({ startedAt: -1 }).lean();
 	const runIds = runningRuns.map((run) => run._id);
 	// Websites picked by hand (marked, or a single "Run check now") while a run is in progress go ahead of the rest of that run.
-	const prioritize = type === 'manual' && Boolean(websiteIds?.length) && runIds.length > 0;
+	const prioritize = Boolean(websiteIds?.length) && runIds.length > 0;
 
 	// A website must never have two open checks at once: two browsers would load the same site and the older result could overwrite the newer one.
 	const openChecks = runIds.length
@@ -40,7 +39,7 @@ export async function enqueueRun({ type = 'manual', websiteIds = null, localRunD
 	if (!queueable.length) return { created: true, joined: true, prioritized: true, skipped, bumped: bumpable.length, queued: 0, runId: String(bumpable[0].run), total: bumpable.length };
 
 	// A manual check made while a run is in progress joins that run, so there is one run, one progress bar and one Cancel button.
-	if (type === 'manual' && runIds.length) {
+	if (runIds.length) {
 		const runId = runIds[0];
 		const checks = await Check.insertMany(queueable.map((website) => ({ run: runId, website: website._id, priority, progressStage: prioritize ? 'Priority queued' : 'Queued' })));
 		const run = await Run.findOneAndUpdate(
@@ -54,7 +53,7 @@ export async function enqueueRun({ type = 'manual', websiteIds = null, localRunD
 		queueable.push(...websites.filter((website) => bumpedIds.has(String(website._id))));
 	}
 
-	const run = await Run.create({ type, total: queueable.length, localRunDate, scope: websiteIds?.length ? 'selected' : 'all' });
+	const run = await Run.create({ total: queueable.length, scope: websiteIds?.length ? 'selected' : 'all' });
 	await Check.insertMany(queueable.map((website) => ({ run: run._id, website: website._id })));
 	return { created: true, skipped, runId: run._id.toString(), total: queueable.length };
 }

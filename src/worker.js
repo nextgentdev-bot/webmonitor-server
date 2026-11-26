@@ -4,6 +4,10 @@ import { connectDatabase } from './db.js';
 import { config } from './config.js';
 import { Setting } from './models.js';
 import { claimNextCheck, completeCheck, failCheck, maybeFinalizeRun, recoverStaleChecks, touchCheck, updateCheckProgress } from './queue.js';
+import { claimNextDomainCheck, completeDomainCheck, failDomainCheck, recoverStaleDomainChecks, touchDomainCheck } from './domain-queue.js';
+import { claimNextTrafficCheck, completeTrafficCheck, failTrafficCheck, recoverStaleTrafficChecks, touchTrafficCheck } from './traffic-queue.js';
+import { inspectDomainHosting } from './domain-info.js';
+import { inspectGoogleTraffic } from './google-traffic.js';
 import { monitorWebsite } from './monitor.js';
 import { syncPendingSheetRows } from './google-sheets.js';
 
@@ -18,17 +22,60 @@ async function updateWorkerHeartbeat(status) {
 	);
 }
 async function loop(browser, slot) {
+	let queueCursor = (slot - 1) % 3;
 	while (!stopping) {
 		let claimed;
+		let claimedDomain;
+		let claimedTraffic;
 		try {
-			claimed = await claimNextCheck(`${workerId}-${slot}`);
+			const queues = ['traffic', 'domain', 'site'];
+			for (let index = 0; index < queues.length; index += 1) {
+				const queue = queues[(queueCursor + index) % queues.length];
+				if (queue === 'traffic') claimedTraffic = await claimNextTrafficCheck(`${workerId}-${slot}`);
+				if (queue === 'domain') claimedDomain = await claimNextDomainCheck(`${workerId}-${slot}`);
+				if (queue === 'site') claimed = await claimNextCheck(`${workerId}-${slot}`);
+				if (claimedTraffic || claimedDomain || claimed) break;
+			}
+			queueCursor = (queueCursor + 1) % queues.length;
 		} catch (error) {
 			console.error(`Worker ${slot} could not claim a check:`, error);
 			await sleep(3000);
 			continue;
 		}
-		if (!claimed) {
+		if (!claimed && !claimedDomain && !claimedTraffic) {
 			await sleep(1200);
+			continue;
+		}
+		if (claimedTraffic) {
+			const { website, runId, range } = claimedTraffic;
+			console.log(`Worker ${slot} checking Google Analytics and Search Console for ${website.url}`);
+			const aliveSignal = setInterval(() => touchTrafficCheck(website._id, runId).catch(() => {}), config.lockHeartbeatMs);
+			try {
+				const result = await inspectGoogleTraffic(website, range);
+				const saved = await completeTrafficCheck(website, runId, result, range);
+				if (saved) console.log(`Worker ${slot} finished Traffic Check for ${website.url}`);
+			} catch (error) {
+				console.error(`Worker ${slot} failed Traffic Check for ${website.url}:`, error);
+				await failTrafficCheck(website, runId, error).catch((saveError) => console.error('Unable to save failed Traffic Check:', saveError));
+			} finally {
+				clearInterval(aliveSignal);
+			}
+			continue;
+		}
+		if (claimedDomain) {
+			const { website, runId } = claimedDomain;
+			console.log(`Worker ${slot} checking domain and hosting details for ${website.url}`);
+			const aliveSignal = setInterval(() => touchDomainCheck(website._id, runId).catch(() => {}), config.lockHeartbeatMs);
+			try {
+				const result = await inspectDomainHosting(website.url);
+				const saved = await completeDomainCheck(website, runId, result);
+				if (saved) console.log(`Worker ${slot} finished domain and hosting lookup for ${website.url}`);
+			} catch (error) {
+				console.error(`Worker ${slot} failed domain and hosting lookup for ${website.url}:`, error);
+				await failDomainCheck(website, runId, error).catch((saveError) => console.error('Unable to save failed domain lookup:', saveError));
+			} finally {
+				clearInterval(aliveSignal);
+			}
 			continue;
 		}
 		console.log(`Worker ${slot} checking ${claimed.website.url}`);
@@ -76,6 +123,8 @@ async function main() {
 	}, 5000);
 	const recovery = setInterval(() => {
 		recoverStaleChecks().catch((error) => console.error('Unable to recover stale checks:', error));
+		recoverStaleDomainChecks().catch((error) => console.error('Unable to recover stale domain lookups:', error));
+		recoverStaleTrafficChecks().catch((error) => console.error('Unable to recover stale Traffic Checks:', error));
 	}, 15000);
 	// Results go to the sheet in batches and are retried until they are written, so a busy or unreachable Google API never drops an update.
 	const sheetSync = setInterval(() => {
@@ -88,6 +137,10 @@ async function main() {
 	try {
 		const recovered = await recoverStaleChecks();
 		if (recovered) console.log(`Recovered ${recovered} checks left by a stopped worker.`);
+		const recoveredDomain = await recoverStaleDomainChecks();
+		if (recoveredDomain) console.log(`Recovered ${recoveredDomain} domain lookups left by a stopped worker.`);
+		const recoveredTraffic = await recoverStaleTrafficChecks();
+		if (recoveredTraffic) console.log(`Recovered ${recoveredTraffic} Traffic Checks left by a stopped worker.`);
 		await Promise.all(Array.from({ length: config.workerConcurrency }, (_, index) => loop(browser, index + 1)));
 	} finally {
 		clearInterval(heartbeat);

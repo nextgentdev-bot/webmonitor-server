@@ -29,7 +29,6 @@ export const config = {
   googleOAuthClientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
   googleOAuthClientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || '',
   googleOAuthRedirectUri: process.env.GOOGLE_OAUTH_REDIRECT_URI || '',
-  defaultDailyTime: process.env.DEFAULT_DAILY_TIME || '02:00',
   defaultTimezone: process.env.DEFAULT_TIMEZONE || 'Asia/Dhaka',
   instantAlertsDefault: bool('INSTANT_ALERTS', true),
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
