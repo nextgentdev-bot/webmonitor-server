@@ -2,12 +2,12 @@ import os from 'node:os';
 import { chromium } from 'playwright';
 import { connectDatabase } from './db.js';
 import { config } from './config.js';
-import { Setting } from './models.js';
+import { Setting, TrafficWebsite } from './models.js';
 import { claimNextCheck, completeCheck, failCheck, maybeFinalizeRun, recoverStaleChecks, touchCheck, updateCheckProgress } from './queue.js';
 import { claimNextDomainCheck, completeDomainCheck, failDomainCheck, recoverStaleDomainChecks, touchDomainCheck } from './domain-queue.js';
-import { claimNextTrafficCheck, completeTrafficCheck, failTrafficCheck, recoverStaleTrafficChecks, touchTrafficCheck } from './traffic-queue.js';
+import { claimNextTrafficCheck, completeTrafficCheck, enqueueDailyTrafficRun, failTrafficCheck, recoverStaleTrafficChecks, touchTrafficCheck } from './traffic-queue.js';
 import { inspectDomainHosting } from './domain-info.js';
-import { inspectGoogleTraffic } from './google-traffic.js';
+import { inspectGoogleTraffic, refreshGoogleRealtimeUsers } from './google-traffic.js';
 import { monitorWebsite } from './monitor.js';
 import { syncPendingSheetRows } from './google-sheets.js';
 
@@ -126,6 +126,67 @@ async function main() {
 		recoverStaleDomainChecks().catch((error) => console.error('Unable to recover stale domain lookups:', error));
 		recoverStaleTrafficChecks().catch((error) => console.error('Unable to recover stale Traffic Checks:', error));
 	}, 15000);
+	let dailyTrafficScheduling = false;
+	const scheduleDailyTraffic = async () => {
+		if (dailyTrafficScheduling) return;
+		dailyTrafficScheduling = true;
+		try {
+			const result = await enqueueDailyTrafficRun();
+			if (result.created) console.log(`Queued daily Traffic Check for ${result.run.startDate}.`);
+		} catch (error) {
+			console.error('Unable to queue the daily Traffic Check:', error);
+		} finally {
+			dailyTrafficScheduling = false;
+		}
+	};
+	scheduleDailyTraffic();
+	const dailyTraffic = setInterval(scheduleDailyTraffic, 60000);
+	let realtimeTrafficRefreshing = false;
+	const refreshRealtimeTraffic = async () => {
+		if (realtimeTrafficRefreshing) return;
+		realtimeTrafficRefreshing = true;
+		let websites = [];
+		try {
+			websites = await TrafficWebsite.find({
+				active: true,
+				'traffic.analyticsPropertyId': { $exists: true, $nin: ['', null] }
+			}).select('_id traffic.analyticsPropertyId').lean();
+			if (!websites.length) return;
+			const results = await refreshGoogleRealtimeUsers(websites);
+			const refreshedAt = new Date();
+			await TrafficWebsite.bulkWrite(results.map(({ websiteId, activeUsers, error }) => ({
+				updateOne: {
+					filter: { _id: websiteId },
+					update: { $set: error
+						? { 'traffic.realtimeError': error }
+						: {
+							'traffic.realtimeActiveUsers': activeUsers,
+							'traffic.realtimeUpdatedAt': refreshedAt,
+							'traffic.realtimeError': ''
+						}
+					}
+				}
+			})), { ordered: false });
+			const failedCount = results.filter(({ error }) => error).length;
+			console.log(`Refreshed GA4 realtime users for ${results.length - failedCount} websites${failedCount ? `; ${failedCount} failed.` : '.'}`);
+		} catch (error) {
+			console.error('Unable to refresh GA4 realtime users:', error);
+			if (websites.length) {
+				try {
+					await TrafficWebsite.updateMany(
+						{ _id: { $in: websites.map(({ _id }) => _id) } },
+						{ $set: { 'traffic.realtimeError': error.message } }
+					);
+				} catch (saveError) {
+					console.error('Unable to save GA4 realtime refresh error:', saveError);
+				}
+			}
+		} finally {
+			realtimeTrafficRefreshing = false;
+		}
+	};
+	refreshRealtimeTraffic();
+	const realtimeTraffic = setInterval(refreshRealtimeTraffic, 10 * 60 * 1000);
 	// Results go to the sheet in batches and are retried until they are written, so a busy or unreachable Google API never drops an update.
 	const sheetSync = setInterval(() => {
 		syncPendingSheetRows().then((result) => {
@@ -145,6 +206,8 @@ async function main() {
 	} finally {
 		clearInterval(heartbeat);
 		clearInterval(recovery);
+		clearInterval(dailyTraffic);
+		clearInterval(realtimeTraffic);
 		clearInterval(sheetSync);
 		await updateWorkerHeartbeat('offline');
 		await browser.close();

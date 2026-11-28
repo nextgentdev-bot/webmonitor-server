@@ -3,6 +3,38 @@ import mongoose from 'mongoose';
 // One entry per pausable check (see check-options.js). paused=false means the check runs as normal.
 const pausedCheck = () => ({ paused: { type: Boolean, default: false }, reason: { type: String, trim: true, default: '' }, pausedAt: { type: Date, default: null } });
 
+const trafficFields = () => ({
+  status: { type: String, enum: ['not-checked', 'pending', 'processing', 'completed', 'failed', 'cancelled'], default: 'not-checked' },
+  run: { type: mongoose.Schema.Types.ObjectId, ref: 'TrafficRun', default: null },
+  queuedAt: { type: Date, default: null },
+  startedAt: { type: Date, default: null },
+  lockedAt: { type: Date, default: null },
+  lockedBy: { type: String, default: '' },
+  checkedAt: { type: Date, default: null },
+  analyticsPropertyId: { type: String, trim: true, default: '' },
+  searchConsoleSiteUrl: { type: String, trim: true, default: '' },
+  reportRanges: {
+    analyticsStartDate: { type: String, default: '' },
+    analyticsEndDate: { type: String, default: '' },
+    searchConsoleStartDate: { type: String, default: '' },
+    searchConsoleEndDate: { type: String, default: '' }
+  },
+  customReport: { type: mongoose.Schema.Types.Mixed, default: null },
+  startDate: { type: String, default: '' },
+  endDate: { type: String, default: '' },
+  analytics: { type: mongoose.Schema.Types.Mixed, default: null },
+  analyticsError: { type: String, default: '' },
+  analyticsStartDate: { type: String, default: '' },
+  analyticsEndDate: { type: String, default: '' },
+  realtimeActiveUsers: { type: Number, default: null },
+  realtimeUpdatedAt: { type: Date, default: null },
+  realtimeError: { type: String, default: '' },
+  searchConsole: { type: mongoose.Schema.Types.Mixed, default: null },
+  searchConsoleError: { type: String, default: '' },
+  searchConsoleStartDate: { type: String, default: '' },
+  searchConsoleEndDate: { type: String, default: '' }
+});
+
 const websiteSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   url: { type: String, required: true, unique: true, trim: true },
@@ -22,23 +54,7 @@ const websiteSchema = new mongoose.Schema({
     error: { type: String, default: '' },
     result: { type: mongoose.Schema.Types.Mixed, default: null }
   },
-  traffic: {
-    status: { type: String, enum: ['not-checked', 'pending', 'processing', 'completed', 'failed', 'cancelled'], default: 'not-checked' },
-    run: { type: mongoose.Schema.Types.ObjectId, ref: 'TrafficRun', default: null },
-    queuedAt: { type: Date, default: null },
-    startedAt: { type: Date, default: null },
-    lockedAt: { type: Date, default: null },
-    lockedBy: { type: String, default: '' },
-    checkedAt: { type: Date, default: null },
-    analyticsPropertyId: { type: String, trim: true, default: '' },
-    searchConsoleSiteUrl: { type: String, trim: true, default: '' },
-    startDate: { type: String, default: '' },
-    endDate: { type: String, default: '' },
-    analytics: { type: mongoose.Schema.Types.Mixed, default: null },
-    analyticsError: { type: String, default: '' },
-    searchConsole: { type: mongoose.Schema.Types.Mixed, default: null },
-    searchConsoleError: { type: String, default: '' }
-  },
+  traffic: trafficFields(),
   sortOrder: { type: Number, index: true },
   lastCheck: { type: mongoose.Schema.Types.ObjectId, ref: 'Check', default: null },
   // The check whose result is already written to the Google Sheet. A website is waiting to be synced while this differs from lastCheck.
@@ -95,16 +111,30 @@ const domainRunSchema = new mongoose.Schema({
 
 const trafficRunSchema = new mongoose.Schema({
   status: { type: String, enum: ['running', 'completed', 'cancelled'], default: 'running', index: true },
+  runType: { type: String, enum: ['daily', 'manual'], default: 'daily' },
   total: { type: Number, default: 0 },
   completed: { type: Number, default: 0 },
   failed: { type: Number, default: 0 },
   startDate: { type: String, required: true },
   endDate: { type: String, required: true },
+  analyticsStartDate: { type: String, default: '' },
+  analyticsEndDate: { type: String, default: '' },
+  searchConsoleStartDate: { type: String, default: '' },
+  searchConsoleEndDate: { type: String, default: '' },
   startedAt: { type: Date, default: Date.now },
   finishedAt: Date
 }, { timestamps: true });
 
+const trafficWebsiteSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  url: { type: String, required: true, unique: true, trim: true },
+  active: { type: Boolean, default: true },
+  traffic: trafficFields(),
+  sortOrder: { type: Number, index: true }
+}, { timestamps: true });
+
 export const Website = mongoose.model('Website', websiteSchema);
+export const TrafficWebsite = mongoose.model('TrafficWebsite', trafficWebsiteSchema, 'traffic_websites');
 export const Check = mongoose.model('Check', checkSchema);
 export const Run = mongoose.model('Run', runSchema);
 export const Setting = mongoose.model('Setting', settingSchema);
