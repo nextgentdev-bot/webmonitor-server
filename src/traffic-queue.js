@@ -1,6 +1,6 @@
 import { Setting, TrafficRun, TrafficWebsite, Website } from './models.js';
 import { config } from './config.js';
-import { inspectGoogleTraffic, trafficDateRange } from './google-traffic.js';
+import { inspectGoogleTraffic, latestTrafficUpdate, trafficDateRange } from './google-traffic.js';
 
 export async function migrateLegacyTrafficWebsites() {
   const migrationKey = 'trafficWebsiteCollectionMigrationV1';
@@ -216,6 +216,7 @@ export async function completeTrafficCheck(website, runId, result, range) {
       'traffic.searchConsoleStartDate': result.searchConsoleStartDate || searchConsoleRange?.startDate || '',
       'traffic.searchConsoleEndDate': result.searchConsoleEndDate || searchConsoleRange?.endDate || '',
       'traffic.checkedAt': new Date(),
+      ...latestTrafficUpdate(result),
       ...(range ? {
         'traffic.startDate': analyticsRange?.startDate || range.startDate,
         'traffic.endDate': analyticsRange?.endDate || range.endDate
@@ -281,4 +282,12 @@ export async function reconcileTrafficRuns(runIds) {
       await TrafficRun.updateOne({ _id: runId, status: 'running' }, { $set: { status: 'completed', finishedAt: new Date() } });
     }
   }
+}
+
+export async function deleteTrafficWebsites(ids) {
+  const filter = { _id: { $in: ids } };
+  const runIds = await TrafficWebsite.distinct('traffic.run', filter);
+  const result = await TrafficWebsite.deleteMany(filter);
+  await Promise.all(runIds.map((runId) => reconcileTrafficRuns([runId])));
+  return result.deletedCount;
 }

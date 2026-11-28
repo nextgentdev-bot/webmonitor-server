@@ -9,8 +9,8 @@ import { config } from './config.js';
 import { Check, DomainRun, Run, Setting, TrafficRun, TrafficWebsite, Website } from './models.js';
 import { cancelRun, enqueueRun, maybeFinalizeRun, reconcileLastCheck, runDetails } from './queue.js';
 import { cancelDomainRun, enqueueDomainRun, reconcileDomainRuns } from './domain-queue.js';
-import { cancelTrafficRun, enqueueTrafficRun, migrateLegacyTrafficWebsites, reconcileTrafficRuns } from './traffic-queue.js';
-import { analyticsDateRangeError, discoverGoogleTrafficProperties, inspectGoogleAnalyticsReports, inspectGoogleTraffic, isValidSearchConsoleSiteUrl, matchAnalyticsProperty, matchSearchConsoleSite, trafficDateRange, trafficReportRangeErrors } from './google-traffic.js';
+import { cancelTrafficRun, deleteTrafficWebsites, enqueueTrafficRun, migrateLegacyTrafficWebsites, reconcileTrafficRuns } from './traffic-queue.js';
+import { analyticsDateRangeError, discoverGoogleTrafficProperties, inspectGoogleAnalyticsReports, inspectGoogleTraffic, isValidSearchConsoleSiteUrl, latestTrafficUpdate, matchAnalyticsProperty, matchSearchConsoleSite, trafficDateRange, trafficReportRangeErrors } from './google-traffic.js';
 import { buildCheckPauseUpdate } from './check-options.js';
 import { countHealthyWebsites, countOpenPriorityChecks, latestCheckPerWebsite, nameFromUrl, normalizeUrl, parseBulkText, summarizeWebsiteProgress, toCsv } from './utils.js';
 import { createGoogleAuthorizationUrl, createResultsSheet, disableGoogleSheetSync, exchangeGoogleAuthorizationCode, googleSheetsStatus, pendingSheetRowCount, syncPendingSheetRows } from './google-sheets.js';
@@ -463,7 +463,8 @@ app.post('/api/traffic/sites/:id/report', async (req, res, next) => {
 		}, { includeAnalyticsOverview: true });
 		await TrafficWebsite.updateOne({ _id: website._id }, { $set: {
 			'traffic.reportRanges': reportRanges,
-			'traffic.customReport': report
+			'traffic.customReport': report,
+			...latestTrafficUpdate(report)
 		} });
 		res.json({ websiteId: String(website._id), reportRanges, ...report });
 	} catch (error) { next(error); }
@@ -498,7 +499,7 @@ app.patch('/api/traffic/sites/:id', async (req, res, next) => {
 		update['traffic.customReport'] = null;
 		update['traffic.startDate'] = '';
 		update['traffic.endDate'] = '';
-		const saved = await TrafficWebsite.findByIdAndUpdate(req.params.id, { $set: update }, { new: true, runValidators: true }).select('name url active traffic').lean();
+		const saved = await TrafficWebsite.findByIdAndUpdate(req.params.id, { $set: update, $unset: { 'traffic.latest': '' } }, { new: true, runValidators: true }).select('name url active traffic').lean();
 		res.json(saved);
 	} catch (error) { next(error); }
 });
@@ -510,6 +511,34 @@ app.delete('/api/traffic/sites/:id', async (req, res, next) => {
 		if (!website) return res.status(404).json({ error: 'Traffic website not found.' });
 		await Promise.all(runIds.map((runId) => reconcileTrafficRuns([runId])));
 		res.json({ ok: true });
+	} catch (error) { next(error); }
+});
+app.post('/api/traffic/sites/bulk-delete', async (req, res, next) => {
+	try {
+		const requestedIds = req.body?.ids;
+		if (!Array.isArray(requestedIds) || requestedIds.length === 0) {
+			return res.status(400).json({ error: 'Select at least one Traffic Check website to delete.' });
+		}
+		if (requestedIds.some((id) => typeof id !== 'string' || !/^[a-f\d]{24}$/i.test(id))) {
+			return res.status(400).json({ error: 'The selected website IDs are invalid.' });
+		}
+
+		const ids = [...new Set(requestedIds.map((id) => id.toLowerCase()))];
+		if (ids.length > config.maxWebsites) {
+			return res.status(400).json({ error: `Select no more than ${config.maxWebsites} websites at a time.` });
+		}
+		await migrateLegacyTrafficWebsites();
+		const busyWebsites = await TrafficWebsite.find({
+			_id: { $in: ids },
+			'traffic.status': { $in: ['pending', 'processing'] }
+		}).select('_id').lean();
+		if (busyWebsites.length) {
+			return res.status(409).json({ error: 'Wait until the selected websites finish their current Traffic Check before deleting them.' });
+		}
+
+		const deleted = await deleteTrafficWebsites(ids);
+		if (!deleted) return res.status(404).json({ error: 'No selected Traffic Check websites were found.' });
+		res.json({ deleted });
 	} catch (error) { next(error); }
 });
 app.post('/api/traffic/runs', async (req, res, next) => {

@@ -163,6 +163,25 @@ export function trafficDateRange(now = new Date(), timeZone = config.defaultTime
   return { startDate: date, endDate: date };
 }
 
+export function latestTrafficUpdate(result, now = new Date()) {
+  const today = trafficDateRange(now).endDate;
+  const date = new Date(`${today}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - 1);
+  const yesterday = date.toISOString().slice(0, 10);
+  const update = {};
+  if (result?.analytics && result.analyticsStartDate === today && result.analyticsEndDate === today) {
+    update['traffic.latest.analytics'] = result.analytics;
+    update['traffic.latest.analyticsDate'] = today;
+    update['traffic.latest.analyticsUpdatedAt'] = now;
+  }
+  if (result?.searchConsole && result.searchConsoleStartDate === yesterday && result.searchConsoleEndDate === yesterday) {
+    update['traffic.latest.searchConsole'] = result.searchConsole;
+    update['traffic.latest.searchConsoleDate'] = yesterday;
+    update['traffic.latest.searchConsoleUpdatedAt'] = now;
+  }
+  return update;
+}
+
 export function analyticsTodayRange(now = new Date(), timeZone = config.defaultTimezone) {
   const date = localDate(now, timeZone);
   return { startDate: date, endDate: date };

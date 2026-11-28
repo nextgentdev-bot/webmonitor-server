@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Setting, TrafficRun, TrafficWebsite, Website } from './models.js';
-import { cancelTrafficRun, claimNextTrafficCheck, completeTrafficCheck, enqueueDailyTrafficRun, enqueueTrafficRun, migrateLegacyTrafficWebsites } from './traffic-queue.js';
+import { cancelTrafficRun, claimNextTrafficCheck, completeTrafficCheck, deleteTrafficWebsites, enqueueDailyTrafficRun, enqueueTrafficRun, migrateLegacyTrafficWebsites } from './traffic-queue.js';
 
 test('queues active websites with either traffic source mapped', async (t) => {
   const originals = {
@@ -268,4 +268,42 @@ test('migrates configured legacy traffic websites to the dedicated collection on
   assert.equal(await migrateLegacyTrafficWebsites(), 0);
   assert.equal(copied[0].updateOne.filter._id, 'legacy-id');
   assert.equal(copied[0].updateOne.update.$setOnInsert.traffic.analyticsPropertyId, '123');
+});
+
+test('bulk deletes only selected traffic websites and reconciles their runs', async (t) => {
+  const originals = {
+    distinct: TrafficWebsite.distinct,
+    deleteMany: TrafficWebsite.deleteMany,
+    aggregate: TrafficWebsite.aggregate,
+    updateOne: TrafficRun.updateOne
+  };
+  t.after(() => {
+    TrafficWebsite.distinct = originals.distinct;
+    TrafficWebsite.deleteMany = originals.deleteMany;
+    TrafficWebsite.aggregate = originals.aggregate;
+    TrafficRun.updateOne = originals.updateOne;
+  });
+
+  const runIds = [];
+  let deleteFilter;
+  TrafficWebsite.distinct = async (field, filter) => {
+    assert.equal(field, 'traffic.run');
+    assert.deepEqual(filter, { _id: { $in: ['site-a', 'site-b'] } });
+    return ['run-a', 'run-b'];
+  };
+  TrafficWebsite.deleteMany = async (filter) => {
+    deleteFilter = filter;
+    return { deletedCount: 2 };
+  };
+  TrafficWebsite.aggregate = async (pipeline) => {
+    runIds.push(pipeline[0].$match['traffic.run']);
+    return [];
+  };
+  TrafficRun.updateOne = async () => {};
+
+  const deleted = await deleteTrafficWebsites(['site-a', 'site-b']);
+
+  assert.equal(deleted, 2);
+  assert.deepEqual(deleteFilter, { _id: { $in: ['site-a', 'site-b'] } });
+  assert.deepEqual(runIds.sort(), ['run-a', 'run-b']);
 });

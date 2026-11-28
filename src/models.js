@@ -20,6 +20,8 @@ const trafficFields = () => ({
     searchConsoleEndDate: { type: String, default: '' }
   },
   customReport: { type: mongoose.Schema.Types.Mixed, default: null },
+  // Newest-day numbers (GA4 today, Search Console yesterday). Kept apart from the chosen report range so the card header never changes with it.
+  latest: { type: mongoose.Schema.Types.Mixed },
   startDate: { type: String, default: '' },
   endDate: { type: String, default: '' },
   analytics: { type: mongoose.Schema.Types.Mixed, default: null },
